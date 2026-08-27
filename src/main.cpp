@@ -3,6 +3,7 @@
 #include "PeerConnector.hpp"
 #include "Protocol.hpp"
 #include "TcpListener.hpp"
+#include "Version.hpp"
 
 #include <QApplication>
 #include <QDebug>
@@ -51,7 +52,7 @@ int main(int argc, char *argv[]) {
         // Build the initial handshake used to identify this FileBridge peer.
         Protocol::HandshakePayload handshake {
             Protocol::VERSION,
-            "0.1.0",
+            FILEBRIDGE_VERSION,
             QSysInfo::machineHostName()
         };
 

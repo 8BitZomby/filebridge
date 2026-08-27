@@ -1,0 +1,7 @@
+#ifndef FILEBRIDGE_VERSION_HPP
+#define FILEBRIDGE_VERSION_HPP
+
+// FileBridge semantic version generated from the CMake project version.
+#define FILEBRIDGE_VERSION "@PROJECT_VERSION@"
+
+#endif

@@ -16,6 +16,13 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # Enable CTest infrastructure so tests can be added cleanly later.
 include(CTest)
 
+# Generate a C++ header containing the semantic version declared by project().
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/Version.hpp.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/Version.hpp"
+    @ONLY
+)
+
 # FileBridge uses Qt for its cross-platform GUI and networking.
 find_package(Qt6 REQUIRED COMPONENTS Widgets Network)
 
@@ -40,6 +47,7 @@ qt_add_executable(fb
 # Allow project headers to be included without relative paths.
 target_include_directories(fb PRIVATE
     include
+    "${CMAKE_CURRENT_BINARY_DIR}/generated"
 )
 
 target_link_libraries(fb PRIVATE
