@@ -26,11 +26,13 @@ qt_standard_project_setup()
 qt_add_executable(fb
     include/NetworkInfo.hpp
     include/PeerConnection.hpp
+    include/PeerConnector.hpp
     include/Protocol.hpp
     include/TcpListener.hpp
     src/main.cpp
     src/NetworkInfo.cpp
     src/PeerConnection.cpp
+    src/PeerConnector.cpp
     src/Protocol.cpp
     src/TcpListener.cpp
 )

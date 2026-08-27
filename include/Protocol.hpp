@@ -2,6 +2,7 @@
 #define FILEBRIDGE_PROTOCOL_HPP
 
 #include <QByteArray>
+#include <QString>
 
 #include <cstdint>
 
@@ -46,6 +47,18 @@ namespace Protocol {
         QByteArray payload;
     };
 
+    // Contains the information exchanged when two FileBridge peers first connect
+    struct HandshakePayload {
+        // FileBridge wire-protocol version used to verify peero compatibility
+        std::uint16_t protocolVersion;
+
+        // FileBridge application version reported by the remote peer
+        QString applicationVersion;
+
+        // Human-readable device name shown when identifying the connected peer
+        QString deviceName;
+    };
+
     /**
      * serializeHeader()
      * Encodes a message header into its platform-independent wire representation
@@ -69,6 +82,24 @@ namespace Protocol {
      * Returns whether a raw message type value is defined by the FileBridge protocol
      */
     bool isValidMessageType(std::uint8_t type);
+
+    /**
+     * serializeHandshake()
+     * Encodes a handshake payload into its binary wire representation
+     */
+    QByteArray serializeHandshake(const HandshakePayload& handshake);
+
+    /**
+     * deserializeHandshake()
+     * Decodes a binary handshake payload into structured peer information
+     */
+    bool deserializeHandshake(const QByteArray& data, HandshakePayload& handshake);
+
+    /**
+     * serializeMessage()
+     * Encodes a complete protocol message at its header followed by its payload
+     */
+    QByteArray serializeMessage(const Message& message);
 }
 
 

@@ -94,3 +94,75 @@ bool Protocol::isValidMessageType(std::uint8_t type) {
     }
     return false;
 }
+
+
+/**
+ * serializeHandshake()
+ * Excodes a handshake payload into its binary wire representation
+ */
+QByteArray Protocol::serializeHandshake(const HandshakePayload& handshake) {
+    QByteArray data;
+
+    // Write the handshake fields into a binary payload
+    QDataStream stream(&data, QIODevice::WriteOnly);
+
+    // Use a fixed byte order so all supported platforms interpret the data identically
+    stream.setByteOrder(QDataStream::BigEndian);
+
+    // Serialize fields in a fixed order that deserializeHandshake() must mirror
+    stream << handshake.protocolVersion;
+    stream << handshake.applicationVersion;
+    stream << handshake.deviceName;
+
+    return data;
+}
+
+
+/**
+ * deserializeHandshake()
+ * Decodes a binary handshake payload into structured peer information
+ */
+bool Protocol::deserializeHandshake(const QByteArray& data, HandshakePayload& handshake) {
+    QDataStream stream(data);
+
+    // Match the byte order used when serializing handshake payloads
+    stream.setByteOrder(QDataStream::BigEndian);
+
+    std::uint16_t protocolVersion = 0;
+    QString applicationVersion;
+    QString deviceName;
+
+    // Read fields in exactly the same order they were serialized
+    stream >> protocolVersion;
+    stream >> applicationVersion;
+    stream >> deviceName;
+
+    // Reject malformed or incomplete handshake payloads
+    if(stream.status() != QDataStream::Ok) {
+        return false;
+    }
+
+    handshake.protocolVersion = protocolVersion;
+    handshake.applicationVersion = applicationVersion;
+    handshake.deviceName = deviceName;
+
+    return true;
+}
+
+
+/**
+ * serializeMessage()
+ * Encodes a complete protocol message as its header followed by its payload
+ */
+QByteArray Protocol::serializeMessage(const Message& message) {
+    // Rebuild the header size from the actual payload so they cannot disagree
+    MessageHeader header = message.header;
+    header.payloadSize = static_cast<std::uint64_t>(message.payload.size());
+
+    QByteArray data = serializeHeader(header);
+
+    // Append the payload immediately after the fixed-size protocol header
+    data.append(message.payload);
+
+    return data;
+}

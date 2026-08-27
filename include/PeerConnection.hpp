@@ -34,6 +34,12 @@ class PeerConnection : public QObject {
          */
         QTcpSocket* socket() const;
 
+        /**
+         * sendMessage()
+         * Serializes and sends one complete FileBridge protocol message to the peer
+         */
+        bool sendMessage(const Protocol::Message& message);
+
     signals:
 
         /**
