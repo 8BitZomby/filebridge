@@ -52,6 +52,15 @@ bool PeerConnection::sendMessage(const Protocol::Message& message) {
 
 
 /**
+ * disconnectFromPeer()
+ * Gracefully closes the TCP connection to the peer
+ */
+void PeerConnection::disconnectFromPeer() {
+    socket_->disconnectFromHost();
+}
+
+
+/**
  * handleReadyRead()
  * Buffers incoming TCP bytes and processes complete framed protocol messages
  */
@@ -70,14 +79,20 @@ void PeerConnection::handleReadyRead() {
         // Reject malformed or undefined protocol headers
         if(!Protocol::deserializeHeader(headerData, header)) {
             qDebug() << "Invalid protocol header";
+            
+            // Discard malformed protocol data and close the invalid peer connection
             receiveBuffer_.clear();
+            disconnectFromPeer();
             return;
         }
 
         // Reject unreasonable payload sizes before converting or buffering further
         if(header.payloadSize > Protocol::MAX_PAYLOAD_SIZE) {
             qDebug() << "Protocol payload exceeds maximum allowed size";
+            
+            // Refuse frames that exceed FileBridge's maximum allowed message size
             receiveBuffer_.clear();
+            disconnectFromPeer();
             return;
         }
 

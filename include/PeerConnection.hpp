@@ -40,6 +40,12 @@ class PeerConnection : public QObject {
          */
         bool sendMessage(const Protocol::Message& message);
 
+        /**
+         * disconnectFromPeer()
+         * Gracefully closes the TCP connection to the peer
+         */
+        void disconnectFromPeer();
+
     signals:
 
         /**

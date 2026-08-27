@@ -191,6 +191,7 @@ void ConnectionManager::handleMessage(PeerConnection *connection, const Protocol
     // No transfer-level messages are valid until the peer completes its handshake
     if(message.header.type != Protocol::MessageType::Handshake && !peer->handshakeReceived) {
         qDebug() << "Received protocol message before handshake completed";
+        connection->disconnectFromPeer();
         return;
     }
 
@@ -199,6 +200,7 @@ void ConnectionManager::handleMessage(PeerConnection *connection, const Protocol
             // A peer should perform the FileBridge handshake only once per connection
             if(peer->handshakeReceived) {
                 qDebug() << "Received duplicate handshake";
+                connection->disconnectFromPeer();
                 return;
             }
 
@@ -207,12 +209,14 @@ void ConnectionManager::handleMessage(PeerConnection *connection, const Protocol
             // Reject malformed handshake payloads before using peer-probided information
             if(!Protocol::deserializeHandshake(message.payload, handshake)) {
                 qDebug() << "Invalid handshake payload";
+                connection->disconnectFromPeer();
                 return;
             }
 
             // Protocol versions must match before either peer can safely exchange messages
             if(handshake.protocolVersion != Protocol::VERSION) {
-                qDebug() << "Unsupported protocol version";
+                qDebug() << "Unsupported protocol version" << handshake.protocolVersion;
+                connection->disconnectFromPeer();
                 return;
             }
 
