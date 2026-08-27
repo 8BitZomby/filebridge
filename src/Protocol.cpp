@@ -15,9 +15,10 @@ QByteArray Protocol::serializeHeader(const MessageHeader& header) {
 
     // Write binary protocol fields into the byte array
     QDataStream stream(&data, QIODevice::WriteOnly);
-
     // Use a fixed byte order so Windows and macOS interpret the same bytes
     stream.setByteOrder(QDataStream::BigEndian);
+    // Pin Qt's serialization format so different Qt 6 releases use the same wire representation.
+    stream.setVersion(QDataStream::Qt_6_0);
 
     // Serialize the one-byte message type followed byt the eight-byte payload size
     stream << static_cast<std::uint8_t>(header.type);
@@ -38,9 +39,10 @@ bool Protocol::deserializeHeader(const QByteArray& data, MessageHeader& header) 
     }
 
     QDataStream stream(data);
-
     // Match the byte order used when serializing protocol headers
     stream.setByteOrder(QDataStream::BigEndian);
+    // Pin Qt's serialization format so different Qt 6 releases use the same wire representation.
+    stream.setVersion(QDataStream::Qt_6_0);
 
     std::uint8_t type = 0;
     std::uint64_t payloadSize = 0;
@@ -105,9 +107,10 @@ QByteArray Protocol::serializeHandshake(const HandshakePayload& handshake) {
 
     // Write the handshake fields into a binary payload
     QDataStream stream(&data, QIODevice::WriteOnly);
-
     // Use a fixed byte order so all supported platforms interpret the data identically
     stream.setByteOrder(QDataStream::BigEndian);
+    // Pin Qt's serialization format so different Qt 6 releases use the same wire representation.
+    stream.setVersion(QDataStream::Qt_6_0);
 
     // Serialize fields in a fixed order that deserializeHandshake() must mirror
     stream << handshake.protocolVersion;
@@ -123,10 +126,12 @@ QByteArray Protocol::serializeHandshake(const HandshakePayload& handshake) {
  * Decodes a binary handshake payload into structured peer information
  */
 bool Protocol::deserializeHandshake(const QByteArray& data, HandshakePayload& handshake) {
+    
     QDataStream stream(data);
-
     // Match the byte order used when serializing handshake payloads
     stream.setByteOrder(QDataStream::BigEndian);
+    // Pin Qt's serialization format so different Qt 6 releases use the same wire representation.
+    stream.setVersion(QDataStream::Qt_6_0);
 
     std::uint16_t protocolVersion = 0;
     QString applicationVersion;
