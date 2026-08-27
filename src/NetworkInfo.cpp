@@ -36,10 +36,36 @@ std::vector<LocalNetworkAddress> NetworkInfo::localIPv4Addresses() {
 
             addresses.push_back({
                 interface.humanReadableName(),
-                address
+                address,
+                address.isLinkLocal()
             });
         }
     }
 
     return addresses;
+}
+
+
+/**
+ * preferredLocalIPv4Address()
+ * Returns the best available local IPv4 address, preferring non-link-local addresses
+ */
+QHostAddress NetworkInfo::preferredLocalIPv4Address() {
+    const std::vector<LocalNetworkAddress> addresses = localIPv4Addresses();
+
+    // Prefer a normal LAN address because it is usually the most useful 
+    // address for another device
+    for(const LocalNetworkAddress& address : addresses) {
+        if(!address.isLinkLocal) {
+            return address.address;
+        }
+    }
+
+    // Fall back to IPv4 link-local when no normal LAN address is available
+    if(!addresses.empty()) {
+        return addresses.front().address;
+    }
+
+    // A null QHostAddress represents that no usable local IPv4 address was found
+    return {};
 }
