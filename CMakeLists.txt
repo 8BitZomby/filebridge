@@ -25,9 +25,11 @@ qt_standard_project_setup()
 # Create the FileBridge executable and list every source file that belongs to it.
 qt_add_executable(fb
     include/NetworkInfo.hpp
+    include/PeerConnection.hpp
     include/TcpListener.hpp
     src/main.cpp
     src/NetworkInfo.cpp
+    src/PeerConnection.cpp
     src/TcpListener.cpp
 )
 
