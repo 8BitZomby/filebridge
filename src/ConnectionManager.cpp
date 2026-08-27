@@ -1,0 +1,189 @@
+#include "ConnectionManager.hpp"
+#include "Protocol.hpp"
+#include "Version.hpp"
+
+#include <QDebug>
+#include <QSysInfo>
+
+#include <algorithm>
+#include <cstdint>
+
+
+/**
+ * Constructor: ConnectionManager()
+ * Connects listener and connector events to the shared peer-connection setup path
+ */
+ConnectionManager::ConnectionManager(QObject *parent) : QObject(parent) {
+    // Configure incoming sockets accepted by the local TCP listener
+    QObject::connect(
+        &listener_,                             // Object that emits the signal
+        &TcpListener::connectionAccepted,       // Signal emitted after an incoming socket is accepted
+        this,                                   // Object that receives the slot call
+        &ConnectionManager::handleEstablishedSocket // Slot that configures the accepted socket
+    );
+
+    // Configure outgoing sockets after a connection attempt succeeds
+    QObject::connect(
+        &connector_,                                // Object that emits the signal
+        &PeerConnector::connectionEstablished,      // Signal emitted after and outgoing connection succeeds
+        this,                                       // Object that receives the slot call
+        &ConnectionManager::handleEstablishedSocket // Shared slot for established sockets
+    );
+
+    // Forward outgoing connection failures to higher-level FileBridge code
+    QObject::connect(
+        &connector_,                            // Object that emits the signal
+        &PeerConnector::connectionFailed,       // Signal emitted when an outgoing attempt fails
+        this,                                   // Object that re-emits the failure
+        &ConnectionManager::connectionFailed    // Signal exposed by ConnectionManager
+    );
+}
+
+
+/**
+ * start()
+ * Starts the local TCP listener on an available port
+ */
+bool ConnectionManager::start() {
+    return listener_.start();
+}
+
+
+/**
+ * connectToPeer()
+ * Starts an outgoing connection attempt to another FileBridge peer
+ */
+void ConnectionManager::connectToPeer(const QHostAddress& address, std::uint16_t port) {
+    connector_.connectToPeer(address, port);
+}
+
+
+/**
+ * listeningPort()
+ * Returns the TCP port currently used for incoming peer connections
+ */
+std::uint16_t ConnectionManager::listeningPort() const {
+    return listener_.port();
+}
+
+
+/**
+ * handleEstablishedSocket()
+ * Wraps and established TCP socket in PeerConnection and begins the handshake
+ */
+void ConnectionManager::handleEstablishedSocket(QTcpSocket *socket) {
+    // Create one managed wrapper for the established TCP connection
+    PeerConnection *connection = new PeerConnection(socket, this);
+    connections_.push_back(connection);
+
+    // Process complete protocol messages received from this specific peer
+    QObject::connect(
+        connection,                         // Object that emits the signal
+        &PeerConnection::messageReceived,   // Signal emitted after a complete protocol message is decoded
+        this,                               // Object that owns the message-handling logic
+        [this, connection](const Protocol::Message& message) {
+
+            handleMessage(connection, message);
+        }
+    );
+
+    // Remove and destroy the peer wrapper when its socket disconnects
+    QObject::connect(
+        connection,                             // Object that emits the signal
+        &PeerConnection::disconnected,          // Signal emitted when the peer disconnects
+        this,                                   // Object that handles connection bookkeeping
+        &ConnectionManager::handlePeerDisconnected
+    );
+
+    // Send our protocol and identity information immediately after the connection setup
+    if(!sendHandshake(connection)) {
+        qDebug() << "Failed to send handshake";
+    }
+
+    emit peerConnected(connection);
+}
+
+
+/**
+ * handlePeerDisconnected()
+ * Removes and destroys the peer connection whose socket has disconnected
+ */
+void ConnectionManager::handlePeerDisconnected() {
+    // sender() identifies which PeerConnection emitted the disconnected signal
+    PeerConnection *connection = qobject_cast<PeerConnection *>(sender());
+
+    if(connection == nullptr) {
+        return;
+    }
+
+    emit peerDisconnected(connection);
+    connection->deleteLater();
+}
+
+
+/**
+ * sendHandshake()
+ * Sends FileBridge protocol, application, and device information to the peer
+ */
+bool ConnectionManager::sendHandshake(PeerConnection *connection) {
+    Protocol::HandshakePayload handshake {
+        Protocol::VERSION,
+        FILEBRIDGE_VERSION,
+        QSysInfo::machineHostName()
+    };
+
+    // Encode the structured handshake fields as protocol payload
+    const QByteArray payload = Protocol::serializeHandshake(handshake);
+
+    // Wrap the payload in a framed protocol message
+    const Protocol::Message message {
+        {
+            Protocol::MessageType::Handshake,
+                static_cast<std::uint64_t>(payload.size())
+        },
+        payload
+    };
+
+    return connection->sendMessage(message);
+}
+
+
+/**
+ * handleMessage()
+ * Processes complete protocol messages received from and established peer
+ */
+void ConnectionManager::handleMessage(PeerConnection *connection, const Protocol::Message& message) {
+    switch(message.header.type) {
+        case Protocol::MessageType::Handshake: {
+            Protocol::HandshakePayload handshake;
+
+            // Reject malformed handshake payloads before using peer-probided information
+            if(!Protocol::deserializeHandshake(message.payload, handshake)) {
+                qDebug() << "Invalid handshake payload";
+                return;
+            }
+
+            qDebug() << "Handshake received";
+            qDebug() << "Protocol version:" << handshake.protocolVersion;
+            qDebug() << "Application version:" << handshake.applicationVersion;
+            qDebug() << "Device name:" << handshake.deviceName;
+
+            break;
+        }
+
+        case Protocol::MessageType::FileOffer:
+        case Protocol::MessageType::FileAccept:
+        case Protocol::MessageType::FileReject:
+        case Protocol::MessageType::FileData:
+        case Protocol::MessageType::FileComplete:
+        case Protocol::MessageType::Error:
+            // These message type will be implemented as their protocol layers are added
+            qDebug() << "Received unhandled message type:"
+                     << static_cast<std::uint8_t>(message.header.type);
+            break;
+        case Protocol::MessageType::Invalid:
+            // Invalid message types should already be rejected by the framing parser
+            qDebug() << "Received invalid protocol message";
+            break;
+    }
+}
