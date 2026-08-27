@@ -1,6 +1,8 @@
 #ifndef FILEBRIDGE_PEER_CONNECTION_HPP
 #define FILEBRIDGE_PEER_CONNECTION_HPP
 
+#include "Protocol.hpp"
+
 #include <QObject>
 #include <QTcpSocket>
 
@@ -35,10 +37,10 @@ class PeerConnection : public QObject {
     signals:
 
         /**
-         * dataReceived()
-         * Reports raw bytes received from the connected peer
+         * messageReceived()
+         * Reports one complete framed FileBridge protocol message
          */
-        void dataReceived(const QByteArray& data);
+        void messageReceived(const Protocol::Message& message);
 
         /**
          * disconnected()
@@ -64,6 +66,9 @@ class PeerConnection : public QObject {
 
         // Connected TCP socket used to communicate with this peer
         QTcpSocket *socket_;
+
+        // Stores incomplete TCP data until one or more complete protocol messages are available
+        QByteArray receiveBuffer_;
 };
 
 

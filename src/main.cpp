@@ -6,6 +6,7 @@
 #include <QDebug>
 #include <QTcpSocket>
 #include <QWidget>
+#include <cstdint>
 
 /**
  * main()
@@ -51,14 +52,17 @@ int main(int argc, char *argv[]) {
                     &app
             );
 
-            // Print raw incoming bytes until the FileBridge protocol layer is implemented
+            // Print complete protocol messages until higher-level message handling is implemented
             QObject::connect(
-                    connection,                     // Sender: Object that emits the signal
-                    &PeerConnection::dataReceived,  // Signal: emitted when peer data arrives
-                    [](const QByteArray& data) {    // Lambda: Handler that receives the emitted byte array
-
-                        qDebug() << "Received:" << data;
-            });
+                connection,                         // Sender: Object that emits the signal
+                &PeerConnection::messageReceived,   // Signal: emitted after a full message is decoded
+                [](const Protocol::Message& message) {// Lambda: Handler receiving the decoded protocol message
+                
+                    qDebug() << "Message type:" << static_cast<std::uint8_t>(message.header.type);
+                    qDebug() << "Payload size:" << message.header.payloadSize;
+                    qDebug() << "Payload:" << message.payload;
+                }
+            );
 
             // Destroy the peer wrapper once the remote side disconnects
             QObject::connect(
