@@ -20,6 +20,12 @@ class TcpListener : public QObject {
         explicit TcpListener(QObject* parent = nullptr);
 
         /**
+         * Destructor: TcpListener()
+         * Destroys the listener and releases its underlying TCP server resources
+         */
+        ~TcpListener() override = default;
+
+        /**
          * start()
          * Starts listening on any available local TCP port
          */
