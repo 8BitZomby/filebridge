@@ -6,14 +6,18 @@
 
 /**
  * TcpListener()
- * Constructs a TCP listener that is initially stopped
+ * Constructs the listener and connects Qt's new-connection signal to 
+ * its handler
  */
-TcpListener::TcpListener() = default;
+TcpListener::TcpListener(QObject *parent) : QObject(parent) {
+    // React whenever QTcpServer reports one or more pending connections
+    connect(&server_, &QTcpServer::newConnection, this, &TcpListener::handleNewConnection);
+}
 
 
 /**
  * start()
- * Starts listening on any available local TCP port
+ * Starts listening for incoming connections on an available IPv4 TCP port
  */
 bool TcpListener::start() {
     if(server_.isListening()) {
@@ -27,7 +31,7 @@ bool TcpListener::start() {
 
 /**
  * stop()
- * Stops accepting new TCP connections
+ * Stops accepting new incoming TCP connections
  */
 void TcpListener::stop() {
     server_.close();
@@ -36,7 +40,7 @@ void TcpListener::stop() {
 
 /**
  * isListening()
- * Returns whether the listener is currently accepting connections
+ * Returns whether the listener is currently listening for connections
  */
 bool TcpListener::isListening() const {
     return server_.isListening();
@@ -45,8 +49,28 @@ bool TcpListener::isListening() const {
 
 /**
  * port()
- * Returns the TCP port currently assigned to the listener
+ * Returns the port assigned to the TCP server while it is listening
  */
 std::uint16_t TcpListener::port() const {
     return static_cast<std::uint16_t>(server_.serverPort());
+}
+
+
+/**
+ * handleNewConnection()
+ * Accepts every pending connections and reports each accepted socket
+ */
+void TcpListener::handleNewConnection() {
+    // Multiple peers may be queued before Qt processes the new-connection event
+    while(server_.hasPendingConnections()) {
+        QTcpSocket *socket = server_.nextPendingConnection();
+
+        // Ignore an invalid result rather than emitting a null socket
+        if(socket == nullptr) {
+            continue;
+        }
+
+        // Notify the rest of FileBridge that a peer connection is ready to use
+        emit connectionAccepted(socket);
+    }
 }
