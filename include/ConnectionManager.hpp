@@ -48,10 +48,10 @@ class ConnectionManager : public QObject {
     signals:
 
         /**
-         * peerConnected()
-         * Reports that a complete FileBridge peer connection has been established
+         * peerReady()
+         * Reports that a peer has completed a valid FileBridge handshake and is ready for use
          */
-        void peerConnected(PeerConnection *connection);
+        void peerReady(PeerConnection *connection);
 
         /**
          * peerDisconnected()
@@ -82,6 +82,18 @@ class ConnectionManager : public QObject {
     private:
 
         /**
+         * ManagedPeer
+         * Tracks an established TCP peer while FileBridge completes its protocol handshake
+         */
+        struct ManagedPeer {
+            // Connection used to exchange framed FileBridge protocol messages
+            PeerConnection *connection;
+
+            // Becomes true after a valid handshake has been received from this peer
+            bool handshakeReceived;
+        };
+
+        /**
          * sendHandshake()
          * Sends FileBridge identification and protocol information to a connected peer
          */
@@ -99,8 +111,8 @@ class ConnectionManager : public QObject {
         // Creates outgoing TCP connections to other FileBridge peers
         PeerConnector connector_;
 
-        // Owns references to all currently active peer connections
-        std::vector<PeerConnection *> connections_;
+        // Tracks all established peers, including those still completing their handshake
+        std::vector<ManagedPeer> connections_;
 };
 
 

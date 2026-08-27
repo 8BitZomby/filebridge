@@ -72,9 +72,16 @@ std::uint16_t ConnectionManager::listeningPort() const {
  * Wraps and established TCP socket in PeerConnection and begins the handshake
  */
 void ConnectionManager::handleEstablishedSocket(QTcpSocket *socket) {
+    // Ignore invalid socket pointers rather than creating an unusable peer connection
+    if(socket == nullptr) {
+        return;
+    }
+
     // Create one managed wrapper for the established TCP connection
     PeerConnection *connection = new PeerConnection(socket, this);
-    connections_.push_back(connection);
+    
+    // Track the peer immediately, but do not consider it ready until its handshake is validated
+    connections_.push_back({connection, false});
 
     // Process complete protocol messages received from this specific peer
     QObject::connect(
@@ -99,8 +106,6 @@ void ConnectionManager::handleEstablishedSocket(QTcpSocket *socket) {
     if(!sendHandshake(connection)) {
         qDebug() << "Failed to send handshake";
     }
-
-    emit peerConnected(connection);
 }
 
 
@@ -116,7 +121,22 @@ void ConnectionManager::handlePeerDisconnected() {
         return;
     }
 
+    // Remove the manager's record for this peer before destroying the QObject
+    connections_.erase(
+        std::remove_if(
+            connections_.begin(),
+            connections_.end(),
+            [connection](const ManagedPeer& peer) {
+
+                return peer.connection == connection;
+            }
+        ),
+        connections_.end()
+    );
+
     emit peerDisconnected(connection);
+    
+    // Defer QObject destruction until Qt has finished processing the current signal
     connection->deleteLater();
 }
 
@@ -150,11 +170,38 @@ bool ConnectionManager::sendHandshake(PeerConnection *connection) {
 
 /**
  * handleMessage()
- * Processes complete protocol messages received from and established peer
+ * Processes a complete protocol message received from a tracked peer
  */
 void ConnectionManager::handleMessage(PeerConnection *connection, const Protocol::Message& message) {
+    // Locate the connection state associated with the peer that sent this message
+    const auto peer = std::find_if(
+        connections_.begin(),
+        connections_.end(),
+        [connection](const ManagedPeer& managedPeer) {
+
+            return managedPeer.connection == connection;
+        }
+    );
+
+    // Ignore messages from connections that are no longer managed
+    if(peer == connections_.end()) {
+        return;
+    }
+
+    // No transfer-level messages are valid until the peer completes its handshake
+    if(message.header.type != Protocol::MessageType::Handshake && !peer->handshakeReceived) {
+        qDebug() << "Received protocol message before handshake completed";
+        return;
+    }
+
     switch(message.header.type) {
         case Protocol::MessageType::Handshake: {
+            // A peer should perform the FileBridge handshake only once per connection
+            if(peer->handshakeReceived) {
+                qDebug() << "Received duplicate handshake";
+                return;
+            }
+
             Protocol::HandshakePayload handshake;
 
             // Reject malformed handshake payloads before using peer-probided information
@@ -163,11 +210,21 @@ void ConnectionManager::handleMessage(PeerConnection *connection, const Protocol
                 return;
             }
 
+            // Protocol versions must match before either peer can safely exchange messages
+            if(handshake.protocolVersion != Protocol::VERSION) {
+                qDebug() << "Unsupported protocol version";
+                return;
+            }
+
+            // The connection is now a validated FileBridge peer and may exchange transfer messages
+            peer->handshakeReceived = true;
+
             qDebug() << "Handshake received";
             qDebug() << "Protocol version:" << handshake.protocolVersion;
             qDebug() << "Application version:" << handshake.applicationVersion;
             qDebug() << "Device name:" << handshake.deviceName;
 
+            emit peerReady(connection);
             break;
         }
 
@@ -177,7 +234,7 @@ void ConnectionManager::handleMessage(PeerConnection *connection, const Protocol
         case Protocol::MessageType::FileData:
         case Protocol::MessageType::FileComplete:
         case Protocol::MessageType::Error:
-            // These message type will be implemented as their protocol layers are added
+            // Transfer-level handling will be added as each protocol message is implemented
             qDebug() << "Received unhandled message type:"
                      << static_cast<std::uint8_t>(message.header.type);
             break;
