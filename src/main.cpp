@@ -4,7 +4,9 @@
 #include <QApplication>
 #include <QDebug>
 #include <QHostAddress>
+#include <QString>
 #include <QWidget>
+#include <cstdint>
 
 /**
  * main()
@@ -33,11 +35,28 @@ int main(int argc, char *argv[]) {
     // Report the listening endpoint while the GUI controls are not yet implemented
     qDebug() << "Listening on port:" << connectionManager.listeningPort();
 
-    // Temporarilty connect FileBridge to itself to verify both connection directions
-    connectionManager.connectToPeer(
-            QHostAddress::LocalHost,
-            connectionManager.listeningPort()
-    );
+    // Connect to a remote peer when an IP address and port are provided on the command line
+    if(argc == 3) {
+        const QHostAddress remoteAddress(QString::fromLocal8Bit(argv[1]));
+
+        bool validPort = false;
+        const unsigned int parsedPort = QString::fromLocal8Bit(argv[2]).toUInt(&validPort);
+
+        // Reject invalid connection arguments before attempting a network connection
+        if(remoteAddress.isNull() || !validPort || parsedPort > 65535) {
+            qDebug() << "Usage: fb [ip port]";
+            return 1;
+        }
+
+        connectionManager.connectToPeer(
+                remoteAddress,
+                static_cast<std::uint16_t>(parsedPort)
+        );
+    }
+    else if(argc != 1) {
+        qDebug() << "Usage: fb [ip port]";
+        return 1;
+    }
 
     // Create the temp FileBridge window while networking is developed
     QWidget window;
