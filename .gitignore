@@ -1,0 +1,15 @@
+# Build output
+build/
+
+# macOS
+.DS_Store
+
+# IDE/editor files
+.vscode/
+.idea/
+
+# Qt Creator
+*.user
+
+# Compile Commands
+compile_commands.json
