@@ -2,6 +2,9 @@
 build/
 compile_commands.json
 
+# Development/tooling cache
+.cache/
+
 # macOS
 .DS_Store
 
