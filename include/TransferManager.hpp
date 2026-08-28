@@ -20,6 +20,24 @@ class TransferManager : public QObject {
     public:
 
         /**
+         * IncomingTransfer
+         * Stores metadata for a file offered by a remote peer.
+         */
+        struct IncomingTransfer {
+            // Unique identifier assigned by the sending peer.
+            std::uint64_t transferId;
+
+            // Original file name reported by the sender.
+            QString fileName;
+
+            // Total file size in bytes.
+            std::uint64_t fileSize;
+
+            // Peer that offered the file.
+            PeerConnection *connection;
+        };
+
+        /**
          * Constructor: TransferManager()
          * Constructs a transfer manager that uses the provided connection manager
          */
@@ -30,6 +48,28 @@ class TransferManager : public QObject {
          * Creates and sends a new file-transfer offer to a ready peer
          */
         bool offerFile(PeerConnection *connection, const QString& filePath);
+
+    signals:
+
+        /**
+         * incomingTransferOffered()
+         * Reports a validated incoming file offer to higher-level application code.
+         */
+        void incomingTransferOffered(const IncomingTransfer& transfer);
+
+        /**
+         * outgoingTransferOffered()
+         * Reports metadata for a file that was successfully offered to a remote peer.
+         */
+        void outgoingTransferOffered(std::uint64_t transferId, const QString& fileName, std::uint64_t fileSize);
+
+    private slots:
+
+        /**
+         * handleFileOfferReceived()
+         * Converts protocol-level file offers into tracked incoming transfers.
+         */
+        void handleFileOfferReceived(PeerConnection *connection, const Protocol::FileOfferPayload& offer);
 
     private:
 
@@ -59,6 +99,9 @@ class TransferManager : public QObject {
 
         // Tracks pending outgoing transfers by their unique transfer identifier
         std::unordered_map<std::uint64_t, OutgoingTransfer> outgoingTransfers_;
+
+        // Tracks pending incoming transfers by their sender-assigned transfer identifier.
+        std::unordered_map<std::uint64_t, IncomingTransfer> incomingTransfers_;
 };
 
 

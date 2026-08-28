@@ -8,12 +8,22 @@
 
 /**
  * TransferManager()
- * Constructs a transfer manager that uses the provided connection manager
+ * Constructs a transfer manager that uses the provided connection manager.
  */
-TransferManager::TransferManager(ConnectionManager *connectionManager, QObject *parent) :
-    QObject(parent),
-    connectionManager_(connectionManager),
-    nextTransferId_(1) {        
+TransferManager::TransferManager(ConnectionManager *connectionManager, QObject *parent)
+    : QObject(parent),
+      connectionManager_(connectionManager),
+      nextTransferId_(1) {
+    
+    // Receive validated FileOffer messages from the connection layer.
+    if(connectionManager_ != nullptr) {
+        QObject::connect(
+            connectionManager_,                              // Manager that receives protocol messages.
+            &ConnectionManager::fileOfferReceived,           // Signal emitted for a valid FileOffer payload.
+            this,                                            // Transfer manager that owns transfer state.
+            &TransferManager::handleFileOfferReceived        // Slot that records the incoming transfer.
+        );
+    }
 }
 
 
@@ -59,7 +69,46 @@ bool TransferManager::offerFile(PeerConnection *connection, const QString& fileP
         }
     );
 
+    // Report the successfully offered file so the UI can display its metadata.
+    emit outgoingTransferOffered(
+        transferId,
+        fileInfo.fileName(),
+        static_cast<std::uint64_t>(fileInfo.size())
+    );
+
     return true;
+}
+
+/**
+ * handleFileOfferReceived()
+ * Converts protocol-level file offers into tracked incoming transfers.
+ */
+void TransferManager::handleFileOfferReceived(PeerConnection *connection, const Protocol::FileOfferPayload& offer) {
+    // Ignore offers that cannot be associated with a valid connected peer.
+    if(connection == nullptr) {
+        return;
+    }
+
+    // Reject duplicate transfer identifiers from the same transfer namespace for now.
+    if(incomingTransfers_.contains(offer.transferId)) {
+        return;
+    }
+
+    // Store the incoming offer so later Accept or Reject actions can reference it by ID.
+    const IncomingTransfer transfer {
+        offer.transferId,
+        offer.fileName,
+        offer.fileSize,
+        connection
+    };
+
+    incomingTransfers_.emplace(
+        offer.transferId,
+        transfer
+    );
+
+    // Notify the GUI that a new pending incoming transfer is available.
+    emit incomingTransferOffered(transfer);
 }
 
 

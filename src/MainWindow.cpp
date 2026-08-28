@@ -79,12 +79,20 @@ MainWindow::MainWindow(QWidget *parent) :
             &MainWindow::handlePeerReady        // Slot that marks the peer as ready
         );
 
-        // Receive proposed file-transfer metadata from validated peers
+        // Display incoming transfers after TransferManager records their transfer state.
         QObject::connect(
-            &connectionManager_,                    // Manager that receives protocol messages
-            &ConnectionManager::fileOfferReceived,  // Signal emitted after a valid FileOffer is decoded
-            this,                                   // Window that displays the incoming offer
-            &MainWindow::handleFileOfferReceived    // Slot that handles the offered file metadata
+            &transferManager_,                              // Manager that owns transfer state.
+            &TransferManager::incomingTransferOffered,      // Signal emitted for a new pending transfer.
+            this,                                           // Window that displays the transfer.
+            &MainWindow::handleIncomingTransferOffered      // Slot that updates the interface.
+        );
+
+        // Display metadata after TransferManager successfully sends an outgoing file offer.
+        QObject::connect(
+            &transferManager_,                              // Manager that owns transfer state.
+            &TransferManager::outgoingTransferOffered,      // Signal emitted after an offer is sent.
+            this,                                           // Window that displays the transfer.
+            &MainWindow::handleOutgoingTransferOffered      // Slot that updates the interface.
         );
 
         // Use a central widget because QMainWindow reserves its outer structure for menus and toolbars
@@ -184,24 +192,38 @@ void MainWindow::handleChooseFileClicked() {
         statusLabel_->setText("Failed to offer selected file");
         return;
     }
-
-    statusLabel_->setText("File offered");
 }
 
 
 /**
- * handleFileOfferReceived()
- * Displays metadata for a file offered by a connected peer
+ * handleOutgoingTransferOffered()
+ * Displays metadata for a file successfully offered to the connected peer.
  */
-void MainWindow::handleFileOfferReceived(PeerConnection *connection, const Protocol::FileOfferPayload& offer) {
-    Q_UNUSED(connection);
+void MainWindow::handleOutgoingTransferOffered(std::uint64_t transferId, const QString& fileName, std::uint64_t fileSize) {
+    Q_UNUSED(transferId);
 
-    // Temporarily display the received offer in the status label for protocol testing
+    // Display the outgoing transfer while the dedicated transfer UI is still under development.
+    statusLabel_->setText(
+        "Offered: " +
+        fileName +
+        " (" +
+        QString::number(fileSize) +
+        " bytes)"
+    );
+}
+
+
+/**
+ * handleIncomingTransferOffered()
+ * Displays a pending incoming transfer reported by the transfer manager.
+ */
+void MainWindow::handleIncomingTransferOffered(const TransferManager::IncomingTransfer& transfer) {
+    // Temporarily display the incoming transfer metadata in the status label.
     statusLabel_->setText(
         "Incoming offer: " +
-        offer.fileName +
+        transfer.fileName +
         " (" +
-        QString::number(offer.fileSize) +
+        QString::number(transfer.fileSize) +
         " bytes)"
     );
 }

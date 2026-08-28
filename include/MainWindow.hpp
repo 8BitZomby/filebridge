@@ -41,10 +41,16 @@ class MainWindow : public QMainWindow {
         void handlePeerReady(PeerConnection *connection);
 
         /**
-         * handleFileOfferReceived()
-         * Displays metadata for a file offered by a connected peer
+         * handleOutgoingTransferOffered()
+         * Displays metadata for a file successfully offered to the connected peer.
          */
-        void handleFileOfferReceived(PeerConnection *connection, const Protocol::FileOfferPayload& offer);
+        void handleOutgoingTransferOffered(std::uint64_t transferId, const QString& fileName, std::uint64_t fileSize);
+
+        /**
+         * handleIncomingTransferOffered()
+         * Displays a pending incoming transfer reported by the transfer manager.
+         */
+        void handleIncomingTransferOffered(const TransferManager::IncomingTransfer& transfer);
 
         /**
          * handleChooseFileClicked()
