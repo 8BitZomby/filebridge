@@ -38,6 +38,7 @@ qt_add_executable(fb
     include/PeerConnector.hpp
     include/Protocol.hpp
     include/TcpListener.hpp
+    include/TransferManager.hpp
     src/main.cpp
     src/ConnectionManager.cpp
     src/MainWindow.cpp
@@ -46,6 +47,7 @@ qt_add_executable(fb
     src/PeerConnector.cpp
     src/Protocol.cpp
     src/TcpListener.cpp
+    src/TransferManager.cpp
 )
 
 # Allow project headers to be included without relative paths.

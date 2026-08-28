@@ -3,6 +3,7 @@
 
 #include "ConnectionManager.hpp"
 #include "Protocol.hpp"
+#include "TransferManager.hpp"
 
 #include <QLabel>
 #include <QLineEdit>
@@ -61,6 +62,9 @@ class MainWindow : public QMainWindow {
 
         // Coordinates all incoming and outgoing FileBridge peer connections
         ConnectionManager connectionManager_;
+
+        // Coordinates outgoing and incoming file-transfer state
+        TransferManager transferManager_;
 
         // Identifies the peer currently available for file-transfer operations
         PeerConnection *activePeer_;

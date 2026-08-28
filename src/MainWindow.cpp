@@ -4,7 +4,6 @@
 #include "Protocol.hpp"
 
 #include <QFileDialog>
-#include <QFileInfo>
 #include <QHostAddress>
 #include <QIntValidator>
 #include <QVBoxLayout>
@@ -18,6 +17,7 @@
  */
 MainWindow::MainWindow(QWidget *parent) : 
     QMainWindow(parent),
+    transferManager_(&connectionManager_, this),
     activePeer_(nullptr),
     localAddressLabel_(new QLabel(this)),
     localPortLabel_(new QLabel(this)),
@@ -159,56 +159,33 @@ void MainWindow::handlePeerReady(PeerConnection *connection) {
 
 /**
  * handleChooseFileClicked()
- * Opens a file picker and prepares metadata for the selected file
+ * Opens a file picker and asks the transfer manager to offer the selected file.
  */
 void MainWindow::handleChooseFileClicked() {
-    // Ask the user to select one existing file from the local filesystem
+    // Ask the user to select one existing file from the local filesystem.
     const QString filePath = QFileDialog::getOpenFileName(
         this,
         "Choose File to Send"
     );
 
-    // Closing the dialog without selecting a file is not an error
+    // Closing the dialog without selecting a file is not an error.
     if(filePath.isEmpty()) {
         return;
     }
 
-    // Read filesystem metadata without loading the file contents into memory
-    const QFileInfo fileInfo(filePath);
-
-    // Reject paths that no longer refer to normal readable file
-    if(!fileInfo.exists() || !fileInfo.isFile() || !fileInfo.isReadable()) {
-        statusLabel_->setText("Selected file is unavailable or unreadable");
-        return;
-    }
-
-    // A transfer requires a currently validated FileBridge peer
+    // A transfer requires a currently validated FileBridge peer.
     if(activePeer_ == nullptr) {
         statusLabel_->setText("No connected peer");
         return;
     }
 
-    // Build the metadata that the receiving peer needs before accepting the transfer
-    const Protocol::FileOfferPayload offer {
-        1,
-        fileInfo.fileName(),
-        static_cast<std::uint64_t>(fileInfo.size())
-    };
-
-    // Send only the metadata offer. File contents are not transmitted yet
-    if(!connectionManager_.sendFileOffer(activePeer_, offer)) {
-        statusLabel_->setText("Failed to send file offer");
+    // Delegate file validation, transfer-ID generation, and FileOffer creation to TransferManager.
+    if(!transferManager_.offerFile(activePeer_, filePath)) {
+        statusLabel_->setText("Failed to offer selected file");
         return;
     }
 
-    // Report the offered file while the transfer UI is still under development
-    statusLabel_->setText(
-        "Offered: " +
-        fileInfo.fileName() +
-        " (" +
-        QString::number(fileInfo.size()) +
-        " bytes"
-    );
+    statusLabel_->setText("File offered");
 }
 
 
