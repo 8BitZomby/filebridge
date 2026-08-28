@@ -59,6 +59,33 @@ void ConnectionManager::connectToPeer(const QHostAddress& address, std::uint16_t
 
 
 /**
+ * sendFileOffer()
+ * Sends metadata for one proposed file transfer to a ready peer
+ */
+bool ConnectionManager::sendFileOffer(PeerConnection *connection, const Protocol::FileOfferPayload& offer) {
+    // Locate the managed state for the peer that should receive the offer
+    const auto peer = std::find_if(
+        connections_.begin(),
+        connections_.end(),
+        [connection](const ManagedPeer& managedPeer) {
+
+            return managedPeer.connection == connection;
+        }
+    );
+
+    // File-transfer messages may only be sent to peers that complete the handshake
+    if(peer == connections_.end() || !peer->handshakeReceived) {
+        return false;
+    }
+
+    // Build the framed FileOffer message from the provided transfer metadata
+    const Protocol::Message message = Protocol::makeFileOfferMessage(offer);
+
+    return connection->sendMessage(message);
+}
+
+
+/**
  * listeningPort()
  * Returns the TCP port currently used for incoming peer connections
  */
@@ -79,7 +106,7 @@ void ConnectionManager::handleEstablishedSocket(QTcpSocket *socket) {
 
     // Create one managed wrapper for the established TCP connection
     PeerConnection *connection = new PeerConnection(socket, this);
-    
+
     // Track the peer immediately, but do not consider it ready until its handshake is validated
     connections_.push_back({connection, false});
 
@@ -232,7 +259,18 @@ void ConnectionManager::handleMessage(PeerConnection *connection, const Protocol
             break;
         }
 
-        case Protocol::MessageType::FileOffer:
+        case Protocol::MessageType::FileOffer: {
+            Protocol::FileOfferPayload offer;
+            // Reject malformed transfer metadata rather than exposing it to higher-level code
+            if(!Protocol::deserializeFileOfferPayload(message.payload, offer)) {
+                qDebug() << "Invalid FileOffer payload";
+                connection->disconnectFromPeer();
+                return;
+            }
+            emit fileOfferReceived(connection, offer);
+            break;
+        }
+
         case Protocol::MessageType::FileAccept:
         case Protocol::MessageType::FileReject:
         case Protocol::MessageType::FileData:

@@ -18,7 +18,7 @@ PeerConnection::PeerConnection(QTcpSocket *socket, QObject *parent) : QObject(pa
     connect(socket_, &QTcpSocket::readyRead, this, &PeerConnection::handleReadyRead);
 
     // React when the remote peer closes the connection
-    connect(socket_, &QTcpSocket::readyRead, this, &PeerConnection::handleDisconnected);
+    connect(socket_, &QTcpSocket::disconnected, this, &PeerConnection::handleDisconnected);
 }
 
 
@@ -33,18 +33,18 @@ QTcpSocket* PeerConnection::socket() const {
 
 /**
  * sendMessage()
- * Serializes and sends one complete FileBridge protocol message to the peer
+ * Serializes and queues one complete FileBridge protocol message for transmission.
  */
 bool PeerConnection::sendMessage(const Protocol::Message& message) {
-    // Reject sends when the socket is not currently connected to a peer
+    // Reject sends when the socket is not currently connected to a peer.
     if(socket_->state() != QAbstractSocket::ConnectedState) {
         return false;
     }
 
-    // Conver the structured protocol messaage into its framed wire representation
+    // Convert the structured protocol message into its framed wire representation.
     const QByteArray data = Protocol::serializeCompleteMessage(message);
 
-    // Queue the complete message for transmission through Qt's TCP socket
+    // Queue the complete message for transmission through Qt's TCP socket.
     const qint64 bytesQueued = socket_->write(data);
 
     return bytesQueued == data.size();

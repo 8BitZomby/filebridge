@@ -2,6 +2,7 @@
 #define FILEBRIDGE_MAIN_WINDOW_HPP
 
 #include "ConnectionManager.hpp"
+#include "Protocol.hpp"
 
 #include <QLabel>
 #include <QLineEdit>
@@ -39,6 +40,18 @@ class MainWindow : public QMainWindow {
         void handlePeerReady(PeerConnection *connection);
 
         /**
+         * handleFileOfferReceived()
+         * Displays metadata for a file offered by a connected peer
+         */
+        void handleFileOfferReceived(PeerConnection *connection, const Protocol::FileOfferPayload& offer);
+
+        /**
+         * handleChooseFileClicked()
+         * Opens a file picker and prepares metadata for the selected file
+         */
+        void handleChooseFileClicked();
+
+        /**
          * handleConnectionFailed()
          * Displays an outgoing connection failure in the interface
          */
@@ -48,6 +61,9 @@ class MainWindow : public QMainWindow {
 
         // Coordinates all incoming and outgoing FileBridge peer connections
         ConnectionManager connectionManager_;
+
+        // Identifies the peer currently available for file-transfer operations
+        PeerConnection *activePeer_;
 
         // Displays the preferred local IPv4 address
         QLabel *localAddressLabel_;
@@ -63,6 +79,9 @@ class MainWindow : public QMainWindow {
 
         // Starts an outgoing peer connection using the entered address and port
         QPushButton *connectButton_;
+
+        // Opens a file picker so the user can choose a file to offer to the connected peer
+        QPushButton *chooseFileButton_;
 
         // Displays the current FileBridge connection status
         QLabel *statusLabel_;

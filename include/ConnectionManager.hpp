@@ -3,6 +3,7 @@
 
 #include "PeerConnection.hpp"
 #include "PeerConnector.hpp"
+#include "Protocol.hpp"
 #include "TcpListener.hpp"
 
 #include <QHostAddress>
@@ -40,6 +41,12 @@ class ConnectionManager : public QObject {
         void connectToPeer(const QHostAddress& address, std::uint16_t port);
 
         /**
+         * sendFileOffer()
+         * Sends matadata for one proposed file transfer to a ready peer
+         */
+        bool sendFileOffer(PeerConnection *connection, const Protocol::FileOfferPayload& offer);
+
+        /**
          * listeningPort()
          * Returns the TCP port currently used for incoming peer connections
          */
@@ -52,6 +59,12 @@ class ConnectionManager : public QObject {
          * Reports that a peer has completed a valid FileBridge handshake and is ready for use
          */
         void peerReady(PeerConnection *connection);
+
+        /**
+         * fileOfferReceived()
+         * Reports file matadata offered by a connectied and validated peer
+         */
+        void fileOfferReceived(PeerConnection *connection, const Protocol::FileOfferPayload& offer);
 
         /**
          * peerDisconnected()

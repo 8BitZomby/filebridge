@@ -1,7 +1,10 @@
 #include "MainWindow.hpp"
 #include "ConnectionManager.hpp"
 #include "NetworkInfo.hpp"
+#include "Protocol.hpp"
 
+#include <QFileDialog>
+#include <QFileInfo>
 #include <QHostAddress>
 #include <QIntValidator>
 #include <QVBoxLayout>
@@ -15,11 +18,13 @@
  */
 MainWindow::MainWindow(QWidget *parent) : 
     QMainWindow(parent),
+    activePeer_(nullptr),
     localAddressLabel_(new QLabel(this)),
     localPortLabel_(new QLabel(this)),
     remoteAddressEdit_(new QLineEdit(this)),
     remotePortEdit_(new QLineEdit(this)),
     connectButton_(new QPushButton("Connect", this)),
+    chooseFileButton_(new QPushButton("Choose File", this)),
     statusLabel_(new QLabel("Ready", this)) {
 
         // Start listening for incoming FileBridge connections before displaying connections
@@ -47,6 +52,9 @@ MainWindow::MainWindow(QWidget *parent) :
         remoteAddressEdit_->setPlaceholderText("192.168.0.10");
         remotePortEdit_->setPlaceholderText("Port");
 
+        // File offers are only valid after a peer completes the FileBridge handshake
+        chooseFileButton_->setEnabled(false);
+
         // Start an outgoing connection when the user presses the Connect button
         QObject::connect(
             connectButton_,                      // Button that emits the signal
@@ -55,12 +63,28 @@ MainWindow::MainWindow(QWidget *parent) :
             &MainWindow::handleConnectClicked   // Slot that validates and connects to the peer
         );
 
+        // Open the file picker when the user chooses to prepare for a transfer
+        QObject::connect(
+            chooseFileButton_,                      // Button that emits the signal
+            &QPushButton::clicked,                  // Signal emitted when the button is pressed
+            this,                                   // Window that handles the action
+            &MainWindow::handleChooseFileClicked    // Slot that opens the file picker
+        );
+
         // Update the interface only after a peer completes a valid FileBridge handshake
         QObject::connect(
             &connectionManager_,                // Manager that emits peer readiness
             &ConnectionManager::peerReady,      // Signal emitted after handshake validation succeeds
             this,                               // Window that displays the connection state
             &MainWindow::handlePeerReady        // Slot that marks the peer as ready
+        );
+
+        // Receive proposed file-transfer metadata from validated peers
+        QObject::connect(
+            &connectionManager_,                    // Manager that receives protocol messages
+            &ConnectionManager::fileOfferReceived,  // Signal emitted after a valid FileOffer is decoded
+            this,                                   // Window that displays the incoming offer
+            &MainWindow::handleFileOfferReceived    // Slot that handles the offered file metadata
         );
 
         // Use a central widget because QMainWindow reserves its outer structure for menus and toolbars
@@ -77,6 +101,9 @@ MainWindow::MainWindow(QWidget *parent) :
         layout->addWidget(remoteAddressEdit_);
         layout->addWidget(remotePortEdit_);
         layout->addWidget(connectButton_);
+
+        layout->addWidget(new QLabel("File transfer:", centralWidget));
+        layout->addWidget(chooseFileButton_);
 
         layout->addWidget(new QLabel("Status:", centralWidget));
         layout->addWidget(statusLabel_);
@@ -119,10 +146,87 @@ void MainWindow::handleConnectClicked() {
  * Updates the interface after a peer completes the FileBridge handshake
  */
 void MainWindow::handlePeerReady(PeerConnection *connection) {
-    Q_UNUSED(connection);
+    // Remember which validated peer may receive file-transfer messages
+    activePeer_ = connection;
 
     statusLabel_->setText("Connected");
     connectButton_->setEnabled(false);
+
+    // File selection becomes available only after the peer is ready for transfer messages
+    chooseFileButton_->setEnabled(true);
+}
+
+
+/**
+ * handleChooseFileClicked()
+ * Opens a file picker and prepares metadata for the selected file
+ */
+void MainWindow::handleChooseFileClicked() {
+    // Ask the user to select one existing file from the local filesystem
+    const QString filePath = QFileDialog::getOpenFileName(
+        this,
+        "Choose File to Send"
+    );
+
+    // Closing the dialog without selecting a file is not an error
+    if(filePath.isEmpty()) {
+        return;
+    }
+
+    // Read filesystem metadata without loading the file contents into memory
+    const QFileInfo fileInfo(filePath);
+
+    // Reject paths that no longer refer to normal readable file
+    if(!fileInfo.exists() || !fileInfo.isFile() || !fileInfo.isReadable()) {
+        statusLabel_->setText("Selected file is unavailable or unreadable");
+        return;
+    }
+
+    // A transfer requires a currently validated FileBridge peer
+    if(activePeer_ == nullptr) {
+        statusLabel_->setText("No connected peer");
+        return;
+    }
+
+    // Build the metadata that the receiving peer needs before accepting the transfer
+    const Protocol::FileOfferPayload offer {
+        1,
+        fileInfo.fileName(),
+        static_cast<std::uint64_t>(fileInfo.size())
+    };
+
+    // Send only the metadata offer. File contents are not transmitted yet
+    if(!connectionManager_.sendFileOffer(activePeer_, offer)) {
+        statusLabel_->setText("Failed to send file offer");
+        return;
+    }
+
+    // Report the offered file while the transfer UI is still under development
+    statusLabel_->setText(
+        "Offered: " +
+        fileInfo.fileName() +
+        " (" +
+        QString::number(fileInfo.size()) +
+        " bytes"
+    );
+}
+
+
+/**
+ * handleFileOfferReceived()
+ * Displays metadata for a file offered by a connected peer
+ */
+void MainWindow::handleFileOfferReceived(PeerConnection *connection, const Protocol::FileOfferPayload& offer) {
+    Q_UNUSED(connection);
+
+    // Temporarily display the received offer in the status label for protocol testing
+    statusLabel_->setText(
+        "Incoming offer: " +
+        offer.fileName +
+        " (" +
+        QString::number(offer.fileSize) +
+        " bytes)"
+    );
 }
 
 
