@@ -42,7 +42,7 @@ bool PeerConnection::sendMessage(const Protocol::Message& message) {
     }
 
     // Conver the structured protocol messaage into its framed wire representation
-    const QByteArray data = Protocol::serializeMessage(message);
+    const QByteArray data = Protocol::serializeCompleteMessage(message);
 
     // Queue the complete message for transmission through Qt's TCP socket
     const qint64 bytesQueued = socket_->write(data);

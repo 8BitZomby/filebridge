@@ -16,8 +16,11 @@ namespace Protocol {
     // Maximum payload size allowed for any single protocol message
     constexpr std::uint64_t MAX_PAYLOAD_SIZE = 64ULL * 1024ULL * 1024ULL;
 
-    // Identifies each FileBridge protocol message with a fixed one-byte value so
-    // peers on different platforms interpret the same wire representation
+    /**
+     * MessageType
+     * Identifies each FileBridge protocol message with a fixed one-byte value so
+     * peers on different platforms interpret the same wire representation
+     */
     enum class MessageType : std::uint8_t {
         Invalid = 0,
         Handshake = 1,
@@ -29,7 +32,10 @@ namespace Protocol {
         Error = 7
     };
 
-    // Fixed metadata that precedes every FileBridge protocol payload
+    /**
+     * MessageHeader
+     * Fixed metadata that precedes every FileBridge protocol payload
+     */
     struct MessageHeader {
         // Identifies how the payload could be interpreted
         MessageType type;
@@ -38,7 +44,10 @@ namespace Protocol {
         std::uint64_t payloadSize;
     };
 
-    // Represents one complete FileBridge protocol message after framing is decoded
+    /**
+     * Message
+     * Represents one complete FileBridge protocol message after framing is decoded
+     */
     struct Message {
         // Fixed metadata describing the message type and payload size
         MessageHeader header;
@@ -47,7 +56,10 @@ namespace Protocol {
         QByteArray payload;
     };
 
-    // Contains the information exchanged when two FileBridge peers first connect
+    /**
+     * HandshakePayload
+     * Contains the information exchanged when two FileBridge peers first connect
+     */
     struct HandshakePayload {
         // FileBridge wire-protocol version used to verify peero compatibility
         std::uint16_t protocolVersion;
@@ -57,6 +69,39 @@ namespace Protocol {
 
         // Human-readable device name shown when identifying the connected peer
         QString deviceName;
+    };
+
+    /**
+     * FileOfferPayload
+     * Describes one file that a peer wants to transfer
+     */
+    struct FileOfferPayload {
+        // Unique identifier used to associate later transfer messages with this file
+        std::uint64_t transferId;
+
+        // Original file name presented to the receiving used
+        QString fileName;
+
+        // Total file size in bytes
+        std::uint64_t fileSize;
+    };
+
+    /**
+     * FileAcceptPayload
+     * Identifies the offered file that the receiver has accepted
+     */
+    struct FileAcceptPayload {
+        // Identifies the transfer that may now begin sending file data
+        std::uint64_t transferId;
+    };
+
+    /**
+     * FileRejectPayload
+     * Identifies the offered file that the receiver has declined
+     */
+    struct FileRejectPayload {
+        // Identifies the transfer that will not proceed
+        std::uint64_t transferId;
     };
 
     /**
@@ -84,22 +129,76 @@ namespace Protocol {
     bool isValidMessageType(std::uint8_t type);
 
     /**
-     * serializeHandshake()
+     * serializeHandshakePayload()
      * Encodes a handshake payload into its binary wire representation
      */
-    QByteArray serializeHandshake(const HandshakePayload& handshake);
+    QByteArray serializeHandshakePayload(const HandshakePayload& handshake);
 
     /**
-     * deserializeHandshake()
+     * deserializeHandshakePayload()
      * Decodes a binary handshake payload into structured peer information
      */
-    bool deserializeHandshake(const QByteArray& data, HandshakePayload& handshake);
+    bool deserializeHandshakePayload(const QByteArray& data, HandshakePayload& handshake);
+
+    /**
+     * serializeFileOfferPayload()
+     * Serializes file-offer metadata into a protocol payload
+     */
+    QByteArray serializeFileOfferPayload(const FileOfferPayload& offer);
+
+    /**
+     * deserializeFileOfferpayload()
+     * Deserializes file-offer metadata from a protocol payload
+     */
+    bool deserializeFileOfferPayload(const QByteArray& data, FileOfferPayload& offer);
+
+    /**
+     * serializeFileAcceptPayload()
+     * Serializes an accepted transfer identifier into a protocol payload
+     */
+    QByteArray serializeFileAcceptPayload(const FileAcceptPayload& accept);
+
+    /**
+     * deserializeFileAcceptPayload()
+     * Deserializes an accepted transfer identifier from a protocol payload
+     */
+    bool deserializeFileAcceptPayload(const QByteArray& data, FileAcceptPayload& accept);
+
+    /**
+     * serializeFileRejectPayload()
+     * Serializes a rejected transfer identifier into a protocol payload
+     */
+    QByteArray serializeFileRejectPayload(const FileRejectPayload& reject);
+
+    /**
+     * deserializeFileRejectPayload()
+     * Deserializes a rejected transfer identifier from a protocol payload
+     */
+    bool deserializeFileRejectPayload(const QByteArray& data, FileRejectPayload& reject);
+
+    /**
+     * makeFileOfferMessage()
+     * Builds a complete FileOffer message from structured file metadata
+     */
+    Message makeFileOfferMessage(const FileOfferPayload& offer);
+
+    /**
+     * makeFileAcceptMessage()
+     * Builds a complete FileAccept message for the specified transfer
+     */
+    Message makeFileAcceptMessage(const FileAcceptPayload& accept);
+
+    /**
+     * makeFileRejectMessage()
+     * Builds a complete FileReject message for the specified transfer
+     */
+    Message makeFileRejectMessage(const FileRejectPayload& reject);
 
     /**
      * serializeMessage()
-     * Encodes a complete protocol message at its header followed by its payload
+     * Encodes a complete FileBridge message as its header followed by its payload bytes
      */
-    QByteArray serializeMessage(const Message& message);
+    QByteArray serializeCompleteMessage(const Message& message);
 }
 
 

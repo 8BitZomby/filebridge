@@ -153,7 +153,7 @@ bool ConnectionManager::sendHandshake(PeerConnection *connection) {
     };
 
     // Encode the structured handshake fields as protocol payload
-    const QByteArray payload = Protocol::serializeHandshake(handshake);
+    const QByteArray payload = Protocol::serializeHandshakePayload(handshake);
 
     // Wrap the payload in a framed protocol message
     const Protocol::Message message {
@@ -207,7 +207,7 @@ void ConnectionManager::handleMessage(PeerConnection *connection, const Protocol
             Protocol::HandshakePayload handshake;
 
             // Reject malformed handshake payloads before using peer-probided information
-            if(!Protocol::deserializeHandshake(message.payload, handshake)) {
+            if(!Protocol::deserializeHandshakePayload(message.payload, handshake)) {
                 qDebug() << "Invalid handshake payload";
                 connection->disconnectFromPeer();
                 return;

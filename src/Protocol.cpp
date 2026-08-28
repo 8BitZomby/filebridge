@@ -99,10 +99,10 @@ bool Protocol::isValidMessageType(std::uint8_t type) {
 
 
 /**
- * serializeHandshake()
+ * serializeHandshakePayload()
  * Excodes a handshake payload into its binary wire representation
  */
-QByteArray Protocol::serializeHandshake(const HandshakePayload& handshake) {
+QByteArray Protocol::serializeHandshakePayload(const HandshakePayload& handshake) {
     QByteArray data;
 
     // Write the handshake fields into a binary payload
@@ -122,10 +122,10 @@ QByteArray Protocol::serializeHandshake(const HandshakePayload& handshake) {
 
 
 /**
- * deserializeHandshake()
+ * deserializeHandshakePayload()
  * Decodes a binary handshake payload into structured peer information
  */
-bool Protocol::deserializeHandshake(const QByteArray& data, HandshakePayload& handshake) {
+bool Protocol::deserializeHandshakePayload(const QByteArray& data, HandshakePayload& handshake) {
     
     QDataStream stream(data);
     // Match the byte order used when serializing handshake payloads
@@ -156,10 +156,219 @@ bool Protocol::deserializeHandshake(const QByteArray& data, HandshakePayload& ha
 
 
 /**
- * serializeMessage()
+ * serializeFileOfferPayload()
+ * Serializes file-offer metadata into a protocol payload
+ */
+QByteArray Protocol::serializeFileOfferPayload(const FileOfferPayload& offer) {
+    QByteArray data;
+    QDataStream stream(&data, QIODevice::WriteOnly);
+
+    // Use the same byte order as the rest of the FileBridge protocol
+    stream.setByteOrder(QDataStream::BigEndian);
+    // Pin Qt's serialization format so different Qt releases use the same wire format
+    stream.setVersion(QDataStream::Qt_6_0);
+
+    // Write fields in a fixed order so the receiver can reconstruct the offer
+    stream << offer.transferId;
+    stream << offer.fileName;
+    stream << offer.fileSize;
+
+    return data;
+}
+
+
+/**
+ * deserializeFileOfferPayload()
+ * Deserializes file-offer metadata from a protocol payload
+ */
+bool Protocol::deserializeFileOfferPayload(const QByteArray &data, FileOfferPayload &offer) {
+    QDataStream stream(data);
+
+    // Match the byte order used when serializing file offers
+    stream.setByteOrder(QDataStream::BigEndian);
+
+    // Use the same fixer serialization format used when the protocol data was written
+    stream.setVersion(QDataStream::Qt_6_0);
+
+    std::uint64_t transferId = 0;
+    QString fileName;
+    std::uint64_t fileSize = 0;
+
+    // Read fields in exactly the same order used by serializeFileOffer()
+    stream >> transferId;
+    stream >> fileName;
+    stream >> fileSize;
+
+    // Reject truncated or otherwise malformed payloads
+    if(stream.status() != QDataStream::Ok) {
+        return false;
+    }
+
+    offer.transferId = transferId;
+    offer.fileName = fileName;
+    offer.fileSize = fileSize;
+
+    return true;
+}
+
+
+/**
+ * serializeFileAcceptPayload()
+ * Serializes an accepted transfer identifier into a protocol payload
+ */
+QByteArray Protocol::serializeFileAcceptPayload(const FileAcceptPayload& accept) {
+    QByteArray data;
+    QDataStream stream(&data, QIODevice::WriteOnly);
+
+    // Use the same byte order as the rest of the FileBridge protocol
+    stream.setByteOrder(QDataStream::BigEndian);
+    // Pin Qt's serialization format so different Qt 6 releases use the same wire representation
+    stream.setVersion(QDataStream::Qt_6_0);
+
+    // The message type already indicates acceptance, so only the transfer identifier is required
+    stream << accept.transferId;
+
+    return data;
+}
+
+
+/**
+ * deserializeFileAcceptPayload()
+ * Deserializes an accepted transfer identifier from a protocol payload
+ */
+bool Protocol::deserializeFileAcceptPayload(const QByteArray& data, FileAcceptPayload& accept) {
+    QDataStream stream(data);
+
+    // Match the byte order used when serializing FileAccept payloads
+    stream.setByteOrder(QDataStream::BigEndian);
+    // Use the same fixed serialization format used when the protocol data was written
+    stream.setVersion(QDataStream::Qt_6_0);
+
+    std::uint64_t transferId = 0;
+
+    // Recover the identifier of the transfer that the receiver accepted
+    stream >> transferId;
+
+    // Reject malformed or incomplete payload data
+    if(stream.status() != QDataStream::Ok) {
+        return false;
+    }
+
+    // Update the output object only after decoding succeeds
+    accept.transferId = transferId;
+
+    return true;
+}
+
+
+/**
+ * serializeFileRejectPayload()
+ * Serializes a rejected transfer identifier into a protocol payload
+ */
+QByteArray Protocol::serializeFileRejectPayload(const FileRejectPayload& reject) {
+    QByteArray data;
+    QDataStream stream(&data, QIODevice::WriteOnly);
+
+    // Use the same byte order as the rest of the FileBridge protocol
+    stream.setByteOrder(QDataStream::BigEndian);
+    //Pin Qt's serialization format so different Qt 6 releases use the same wire representation
+    stream.setVersion(QDataStream::Qt_6_0);
+
+    // The message type already indicates rejection, so only the transfer identifier is required
+    stream << reject.transferId;
+
+    return data;
+}
+
+
+/**
+ * deserializeFilePayload()
+ * Deserializes a rejected transfer identifier from a protocol payload
+ */
+bool Protocol::deserializeFileRejectPayload(const QByteArray& data, FileRejectPayload& reject) {
+    QDataStream stream(data);
+
+    // Match the byte order used when serializing FileReject payloads
+    stream.setByteOrder(QDataStream::BigEndian);
+    // Use the same fixed serialization format used when the protocol data was written
+    stream.setVersion(QDataStream::Qt_6_0);
+
+    std::uint64_t transferId = 0;
+
+    // Recover the identifier of the transfer that the receiver rejected
+    stream >> transferId;
+
+    // Reject malformed or incomplete payload data
+    if(stream.status() != QDataStream::Ok) {
+        return false;
+    }
+
+    // Update the output object only after decoding succeeds
+    reject.transferId = transferId;
+
+    return true;
+}
+
+
+/**
+ * makeFileOfferMessage()
+ * Builds a complete FileOffer message from structured file metadata
+ */
+Protocol::Message Protocol::makeFileOfferMessage(const FileOfferPayload& offer) {
+    // Encode the message-specific meafata before adding the common FileBridge framing
+    const QByteArray payload = serializeFileOfferPayload(offer);
+
+    return {
+        {
+            MessageType::FileOffer,
+            static_cast<std::uint64_t>(payload.size())
+        },
+        payload
+    };
+}
+
+
+/**
+ * makeFileAcceptMessage()
+ * Builds a complete FileAccept message for the specified transfer
+ */
+Protocol::Message Protocol::makeFileAcceptMessage(const FileAcceptPayload& accept) {
+    // Encode the accepted transfer identifier before adding the common FileBridge framing
+    const QByteArray payload = serializeFileAcceptPayload(accept);
+
+    return {
+        {
+            MessageType::FileAccept,
+            static_cast<std::uint64_t>(payload.size())
+        },
+        payload
+    };
+}
+
+
+/**
+ * makeFileRejectMessage()
+ * Builds a complete FileReject message for the specified transfer
+ */
+Protocol::Message Protocol::makeFileRejectMessage(const FileRejectPayload& reject) {
+    // Encode the rejected transfer identifier before adding the common FileBridge framing
+    const QByteArray payload = serializeFileRejectPayload(reject);
+
+    return {
+        {
+            MessageType::FileReject,
+            static_cast<std::uint64_t>(payload.size())
+        },
+        payload
+    };
+}
+
+
+/**
+ * serializeCompleteMessage()
  * Encodes a complete protocol message as its header followed by its payload
  */
-QByteArray Protocol::serializeMessage(const Message& message) {
+QByteArray Protocol::serializeCompleteMessage(const Message& message) {
     // Rebuild the header size from the actual payload so they cannot disagree
     MessageHeader header = message.header;
     header.payloadSize = static_cast<std::uint64_t>(message.payload.size());
