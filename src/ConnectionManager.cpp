@@ -86,6 +86,59 @@ bool ConnectionManager::sendFileOffer(PeerConnection *connection, const Protocol
 
 
 /**
+ * sendFileAccept()
+ * Sends acceptance for one pending incoming file transfer
+ */
+bool ConnectionManager::sendFileAccept(PeerConnection *connection, const Protocol::FileAcceptPayload& accept) {
+    // Locate the managed state for the peer that should receive the response
+    const auto peer = std::find_if(
+        connections_.begin(),
+        connections_.end(),
+        [connection](const ManagedPeer& managedPeer) {
+
+            return managedPeer.connection == connection;
+        }
+    );
+
+    // Transfer responses may only be sent to validated FileBridge peers
+    if(peer == connections_.end() || !peer->handshakeReceived) {
+        return false;
+    }
+
+    // Build the complete FileAccept protocol message from the transfer identifier
+    const Protocol::Message message = Protocol::makeFileAcceptMessage(accept);
+
+    return connection->sendMessage(message);
+}
+
+/**
+ * sendFileReject()
+ * Sends rejection for one pending incoming file transfer
+ */
+bool ConnectionManager::sendFileReject(PeerConnection *connection, const Protocol::FileRejectPayload& reject) {
+    // Locate the managed state for the peer that should receive the response
+    const auto peer = std::find_if(
+        connections_.begin(),
+        connections_.end(),
+        [connection](const ManagedPeer& managedPeer) {
+
+            return managedPeer.connection == connection;
+        }
+    );
+
+    // Transfer responses may only be sent to validated FileBridge peers
+    if(peer == connections_.end() || !peer->handshakeReceived) {
+        return false;
+    }
+
+    // Build the complete FileAccept protocol message from the transfer identifier
+    const Protocol::Message message = Protocol::makeFileRejectMessage(reject);
+
+    return connection->sendMessage(message);
+}
+
+
+/**
  * listeningPort()
  * Returns the TCP port currently used for incoming peer connections
  */
@@ -271,9 +324,31 @@ void ConnectionManager::handleMessage(PeerConnection *connection, const Protocol
             break;
         }
 
-        case Protocol::MessageType::FileAccept:
-        case Protocol::MessageType::FileReject:
-        case Protocol::MessageType::FileData:
+        case Protocol::MessageType::FileAccept: {
+            Protocol::FileAcceptPayload accept;
+            // Reject malformed acceptance messages before exposing them to transfer
+            if(!Protocol::deserializeFileAcceptPayload(message.payload, accept)) {
+                qDebug() << "Invalid FileAccept payload";
+                connection->disconnectFromPeer();
+                return;
+            }
+            emit fileAcceptReceived(connection, accept);
+            break;
+        }
+
+        case Protocol::MessageType::FileReject: {
+            Protocol::FileRejectPayload reject;
+            // Reject malformed rejection messages before exposing them to transfer logic
+            if(!Protocol::deserializeFileRejectPayload(message.payload, reject)) {
+                qDebug() << "Invalid FileReject payload";
+                connection->disconnectFromPeer();
+                return;
+            }
+            emit fileRejectReceived(connection, reject);
+            break;
+        }
+
+        case Protocol::MessageType::FileData: 
         case Protocol::MessageType::FileComplete:
         case Protocol::MessageType::Error:
             // Transfer-level handling will be added as each protocol message is implemented

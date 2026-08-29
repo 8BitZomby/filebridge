@@ -47,6 +47,18 @@ class ConnectionManager : public QObject {
         bool sendFileOffer(PeerConnection *connection, const Protocol::FileOfferPayload& offer);
 
         /**
+         * sendFileAccept()
+         * Sends acceptance for one pending incoming file transfer
+         */
+        bool sendFileAccept(PeerConnection *connection, const Protocol::FileAcceptPayload& accept);
+
+        /**
+         * sendFileReject()
+         * Sends rejection for one pending incoming file transfer
+         */
+        bool sendFileReject(PeerConnection *connection, const Protocol::FileRejectPayload& reject);
+
+        /**
          * listeningPort()
          * Returns the TCP port currently used for incoming peer connections
          */
@@ -65,6 +77,18 @@ class ConnectionManager : public QObject {
          * Reports file matadata offered by a connectied and validated peer
          */
         void fileOfferReceived(PeerConnection *connection, const Protocol::FileOfferPayload& offer);
+
+        /**
+         * fileAcceptReceived()
+         * Reports that a remote peer accepted one offered file transfer
+         */
+        void fileAcceptReceived(PeerConnection *connection, const Protocol::FileAcceptPayload& accept);
+
+        /**
+         * fileRejectReceived()
+         * Reports that a remote peer rejected one offered file transfer
+         */
+        void fileRejectReceived(PeerConnection *connection, const Protocol::FileRejectPayload& reject);
 
         /**
          * peerDisconnected()

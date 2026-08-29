@@ -47,10 +47,33 @@ class MainWindow : public QMainWindow {
         void handleOutgoingTransferOffered(std::uint64_t transferId, const QString& fileName, std::uint64_t fileSize);
 
         /**
+         * handleOutgoingTransferAccepted()
+         */
+        void handleOutgoingTransferAccepted(std::uint64_t transferId);
+
+        /**
+         * handleOutgoingTranferRejected()
+         * Displays that the remote peer rejected an outgoing transfer
+         */
+        void handleOutgoingTransferRejected(std::uint64_t transferId);
+
+        /**
          * handleIncomingTransferOffered()
          * Displays a pending incoming transfer reported by the transfer manager.
          */
         void handleIncomingTransferOffered(const TransferManager::IncomingTransfer& transfer);
+
+        /**
+         * handleAcceptTransferClicked()
+         * Accepts the currently displayed incoming transfer
+         */
+        void handleAcceptTransferClicked();
+
+        /**
+         * handleRejectTransferClicked()
+         * Rejects the currently displayed incoming transfer
+         */
+        void handleRejectTransferClicked();
 
         /**
          * handleChooseFileClicked()
@@ -75,6 +98,9 @@ class MainWindow : public QMainWindow {
         // Identifies the peer currently available for file-transfer operations
         PeerConnection *activePeer_;
 
+        // Identifies the incoming transfer currently awaiting a used decision
+        std::uint64_t pendingIncomingTransferId_;
+
         // Displays the preferred local IPv4 address
         QLabel *localAddressLabel_;
 
@@ -92,6 +118,12 @@ class MainWindow : public QMainWindow {
 
         // Opens a file picker so the user can choose a file to offer to the connected peer
         QPushButton *chooseFileButton_;
+
+        // Accepts the currently displayed incoming file offer
+        QPushButton *acceptTransferButton_;
+
+        // Rejects the currently displayed incoming file offer
+        QPushButton *rejectTransferButton_;
 
         // Displays the current FileBridge connection status
         QLabel *statusLabel_;

@@ -49,6 +49,18 @@ class TransferManager : public QObject {
          */
         bool offerFile(PeerConnection *connection, const QString& filePath);
 
+        /**
+         * acceptIncomingTransfer()
+         * Accepts one pending incoming transfer and notifies the sending peer.
+         */
+        bool acceptIncomingTransfer(std::uint64_t transferId);
+
+        /**
+         * rejectIncomingTransfer()
+         * Rejects one pending incoming transfer and notifies the sending peer.
+         */
+        bool rejectIncomingTransfer(std::uint64_t transferId);
+    
     signals:
 
         /**
@@ -63,6 +75,18 @@ class TransferManager : public QObject {
          */
         void outgoingTransferOffered(std::uint64_t transferId, const QString& fileName, std::uint64_t fileSize);
 
+        /**
+         * outgoingTransferAccepted()
+         * Reports that a remote peer accepted an outgoing transfer.
+         */
+        void outgoingTransferAccepted(std::uint64_t transferId);
+
+        /**
+         * outgoingTransferRejected()
+         * Reports that a remote peer rejected an outgoing transfer.
+         */
+        void outgoingTransferRejected(std::uint64_t transferId);
+
     private slots:
 
         /**
@@ -70,6 +94,18 @@ class TransferManager : public QObject {
          * Converts protocol-level file offers into tracked incoming transfers.
          */
         void handleFileOfferReceived(PeerConnection *connection, const Protocol::FileOfferPayload& offer);
+
+        /**
+         * handleFileAcceptReceived()
+         * Updates outgoing transfer state after the remote peer accepts an offer.
+         */
+        void handleFileAcceptReceived(PeerConnection *connection, const Protocol::FileAcceptPayload& accept);
+
+        /**
+         * handleFileRejectReceived()
+         * Updates outgoing transfer state after the remote peer rejects an offer.
+         */
+        void handleFileRejectReceived(PeerConnection *connection, const Protocol::FileRejectPayload& reject);
 
     private:
 
