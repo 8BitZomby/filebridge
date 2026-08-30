@@ -64,6 +64,11 @@ class ConnectionManager : public QObject {
          */
         bool sendFileData(PeerConnection *connection, const Protocol::FileDataPayload& fileData);
 
+        /** sendFileComplete()
+         * Sends completion for one finished outgoing file transfer
+         */
+        bool sendFileComplete(PeerConnection *connection, const Protocol::FileCompletePayload& complete);
+
         /**
          * listeningPort()
          * Returns the TCP port currently used for incoming peer connections
@@ -101,6 +106,12 @@ class ConnectionManager : public QObject {
          * Reports one decoded chunk of file data received from a peer
          */
         void fileDataReceived(PeerConnection *connection, const Protocol::FileDataPayload& fileData);
+
+        /**
+         * fileCompleteReceived()
+         * Reports that a peer finished sending all file data for one transfer
+         */
+        void fileCompleteReceived(PeerConnection *connection, const Protocol::FileCompletePayload& complete);
 
         /**
          * peerDisconnected()

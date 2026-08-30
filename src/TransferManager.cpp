@@ -54,6 +54,14 @@ TransferManager::TransferManager(ConnectionManager *connectionManager, QObject *
         this,                                               // Receiver: This TransferManager instance
         &TransferManager::handleFileDataReceived            // Slot: Validates and records the incoming chunk
     );
+
+    // Received completion messages for incoming file transfers
+    QObject::connect(
+        connectionManager_,                                 // Sender: ConnectionManager that received the protocol message
+        &ConnectionManager::fileCompleteReceived,           // Signal: Emitted when a valid FileComplete message is received
+        this,                                               // Receiver: This TransferManager instance
+        &TransferManager::handleFileCompleteReceived        // Slot: Verifies and finalizes the incoming transfer
+    );
 }
 
 
@@ -373,6 +381,37 @@ void TransferManager::handleFileDataReceived(
 
 
 /**
+ * handleFileCompleteReceived()
+ * Finalizes an incoming transfer after the sender reports completion
+ */
+void TransferManager::handleFileCompleteReceived(PeerConnection *connection, const Protocol::FileCompletePayload& complete) {
+    // Locate the incoming transfer identified by the completion message
+    const auto transfer = incomingTransfers_.find(complete.transferId);
+
+    // Ignore completion messages that do not match a known incoming transfer
+    if(transfer == incomingTransfers_.end()) {
+        return;
+    }
+    
+    // Reject completion messages that came from a different peer than the original offer
+    if(transfer->second.connection != connection) {
+        return;
+    }
+
+    // A transfer is only complete when every byte declared in the original offer was received
+    if(transfer->second.bytesReceived != transfer->second.fileSize) {
+        return;
+    }
+
+    // Notify the GUI that the incoming file was completely received and written
+    emit incomingTransferCompleted(complete.transferId);
+
+    // The completed incoming transfer no longer needs to remain tracked
+    incomingTransfers_.erase(transfer);
+}
+
+
+/**
  * sendFileContents()
  * Reads one accepted local file in chunks and sends each chunk to the peer.
  */
@@ -420,6 +459,16 @@ bool TransferManager::sendFileContents(const OutgoingTransfer& transfer) {
         // Advance the offset by the exact number of raw file bytes just sent.
         offset += static_cast<std::uint64_t>(chunk.size());
     }
+    // Tell the receiver that no more FileData messages will be sent for this transfer
+    const Protocol::FileCompletePayload complete { transfer.transferId };
+
+    if(!connectionManager_->sendFileComplete(transfer.connection, complete)) {
+        return false;
+    }
+
+    // Report that all file data and the completion message were successfully queued
+    emit outgoingTransferCompleted(transfer.transferId);
+
     return true;
 }
 

@@ -2,6 +2,7 @@
 #define FILEBRIDGE_TRANSFER_MANAGER_HPP
 
 #include "ConnectionManager.hpp"
+#include "Protocol.hpp"
 
 #include <QObject>
 #include <QString>
@@ -106,6 +107,18 @@ class TransferManager : public QObject {
          */
         void outgoingTransferRejected(std::uint64_t transferId);
 
+        /**
+         * outgoingTransferCompleted()
+         * Reports that an outgoing transfer finished sending all file data
+         */
+        void outgoingTransferCompleted(std::uint64_t transferId);
+
+        /**
+         * incomingTransferCompleted()
+         * Reports that an incoming transfer finished receiving all expected file data
+         */
+        void incomingTransferCompleted(std::uint64_t transferId);
+
     private slots:
 
         /**
@@ -131,6 +144,12 @@ class TransferManager : public QObject {
          * Validates and records one incoming file-data chunk
          */
         void handleFileDataReceived(PeerConnection *connection, const Protocol::FileDataPayload& fileData);
+
+        /**
+         * handleFileompleteReceived()
+         * Finalizes an incoming transfer after the sender reports completion
+         */
+        void handleFileCompleteReceived(PeerConnection *connection, const Protocol::FileCompletePayload& complete);
 
     private:
 

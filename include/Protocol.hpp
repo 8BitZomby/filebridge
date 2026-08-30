@@ -120,6 +120,15 @@ namespace Protocol {
     };
 
     /**
+     * FileCompletePayload
+     * Identifies a file transfer whose data has been fully sent
+     */
+    struct FileCompletePayload {
+        // Identifies the transfer that has finished sending file data
+        std::uint64_t transferId;
+    };
+
+    /**
      * serializeHeader()
      * Encodes a message header into its platform-independent wire representation
      */
@@ -204,6 +213,20 @@ namespace Protocol {
     bool deserializeFileDataPayload(const QByteArray& data, FileDataPayload& fileData);
 
     /**
+     * serializeFileCompletePayload()
+     * Encodes a completed transfer identifier into the payload bytes of a 
+     * FileComplete message
+     */
+    QByteArray serializeFileCompletePayload(const FileCompletePayload& complete);
+
+    /**
+     * deserializeFileCompletePayload()
+     * Decodes the payload bytes of a FileComplete message into its transfer
+     * identifier
+     */
+    bool deserializeFileCompletePayload(const QByteArray& data, FileCompletePayload& complete);
+
+    /**
      * makeFileOfferMessage()
      * Builds a complete FileOffer message from structured file metadata
      */
@@ -226,6 +249,12 @@ namespace Protocol {
      * Builds a complete FileData message from one file-data chunk
      */
     Message makeFileDataMessage(const FileDataPayload& fileData);
+
+    /**
+     * makeFileCompleteMessage()
+     * Builds a complete FileComplete message for a finished transfer
+     */
+    Message makeFileCompleteMessage(const FileCompletePayload& complete);
 
     /**
      * serializeMessage()

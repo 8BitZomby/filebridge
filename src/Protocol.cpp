@@ -373,6 +373,56 @@ bool Protocol::deserializeFileDataPayload(const QByteArray& data, FileDataPayloa
 
 
 /**
+ * serializeFileCompletePayload()
+ * Encodes a completed transfer identifier into the payload bytes of a FileComplete
+ * message
+ */
+QByteArray Protocol::serializeFileCompletePayload(const FileCompletePayload &complete) {
+    QByteArray data;
+    QDataStream stream(&data, QIODevice::WriteOnly);
+
+    // Use the same byte order as the rest of the FileBridge protocol
+    stream.setByteOrder(QDataStream::BigEndian);
+    // Pin Qt's serialization format so different Qt 6 releases use the same wire representation
+    stream.setVersion(QDataStream::Qt_6_0);
+
+    // FileComplete only needs the identifier of the transfer that finished sending
+    stream << complete.transferId;
+
+    return data;
+}
+
+
+/**
+ * deserializeFileCompletePayload()
+ * Decodes the payload bytes of a FileComplete message into its transfer identifier
+ */
+bool Protocol::deserializeFileCompletePayload(const QByteArray &data, FileCompletePayload &complete) {
+    QDataStream stream(data);
+
+    // Match the byte order used when serializing FileComplete payloads
+    stream.setByteOrder(QDataStream::BigEndian);
+    // Use the same fixed serialization format used when the protocol data was written
+    stream.setVersion(QDataStream::Qt_6_0);
+
+    std::uint64_t transferId = 0;
+
+    // Recover the identifier of the transfer that finished sending
+    stream >> transferId;
+
+    // Reject malformed or incomplete payload data
+    if(stream.status() != QDataStream::Ok) {
+        return false;
+    }
+
+    // Update the output object only after decoding succeeds
+    complete.transferId = transferId;
+
+    return true;
+}
+
+
+/**
  * makeFileDataMessage()
  * Builds a complete FileData message from one file-data chunk
  */
@@ -388,6 +438,29 @@ Protocol::Message Protocol::makeFileDataMessage(const FileDataPayload &fileData)
     return {
         {
             MessageType::FileData,
+            static_cast<std::uint64_t>(payload.size())
+        },
+        payload
+    };
+}
+
+
+/** 
+ * makeFileCompleteMessage()
+ * BUilds a complete FileComplete message for a finished transfer
+ */
+Protocol::Message Protocol::makeFileCompleteMessage(const FileCompletePayload &complete) {
+    // Econde the FileComplete-specific transfer identifier into payload bytes
+    const QByteArray payload = serializeFileCompletePayload(complete);
+
+    // Aggregate initialization equivalent to:
+    // Protocol::Message {
+    //      Protocol::MessageHeader {messageType, payloadSize},
+    //      payload
+    // }
+    return {
+        {
+            MessageType::FileComplete,
             static_cast<std::uint64_t>(payload.size())
         },
         payload

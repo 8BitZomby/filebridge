@@ -65,74 +65,91 @@ MainWindow::MainWindow(QWidget *parent) :
 
         // Start an outgoing connection when the user presses the Connect button
         QObject::connect(
-            connectButton_,                             // Button that emits the signal
-            &QPushButton::clicked,                      // Signal emitted when the button is pressed
-            this,                                       // Window that handles the action
-            &MainWindow::handleConnectClicked           // Slot that validates and connects to the peer
+            connectButton_,                                 // Button that emits the signal
+            &QPushButton::clicked,                          // Signal emitted when the button is pressed
+            this,                                           // Window that handles the action
+            &MainWindow::handleConnectClicked               // Slot that validates and connects to the peer
         );
 
         // Open the file picker when the user chooses to prepare for a transfer
         QObject::connect(
-            chooseFileButton_,                          // Button that emits the signal
-            &QPushButton::clicked,                      // Signal emitted when the button is pressed
-            this,                                       // Window that handles the action
-            &MainWindow::handleChooseFileClicked        // Slot that opens the file picker
+            chooseFileButton_,                              // Button that emits the signal
+            &QPushButton::clicked,                          // Signal emitted when the button is pressed
+            this,                                           // Window that handles the action
+            &MainWindow::handleChooseFileClicked            // Slot that opens the file picker
         );
 
         // Accept the currently displayed incoming transfer when the user clicks Accept
         QObject::connect(
-            acceptTransferButton_,                      // Sender: Accept button in the FileBridge window
-            &QPushButton::clicked,                      // Signal: Emitted when the user clicks the button
-            this,                                       // Receiver: This MainWindow instance
-            &MainWindow::handleAcceptTransferClicked    // Slot: Accepts the pending incoming transfer
+            acceptTransferButton_,                          // Sender: Accept button in the FileBridge window
+            &QPushButton::clicked,                          // Signal: Emitted when the user clicks the button
+            this,                                           // Receiver: This MainWindow instance
+            &MainWindow::handleAcceptTransferClicked        // Slot: Accepts the pending incoming transfer
         );
 
         // Reject the currently displayed incoming transfer when the user clicks Reject
         QObject::connect(
-            rejectTransferButton_,                      // Sender: Reject button in the FileBridge window
-            &QPushButton::clicked,                      // Signal: Emitted when the user clicks the button
-            this,                                       // Receiver: This MainWindow instance
-            &MainWindow::handleRejectTransferClicked    // Slot: Rejects the pending incoming transfer
+            rejectTransferButton_,                          // Sender: Reject button in the FileBridge window
+            &QPushButton::clicked,                          // Signal: Emitted when the user clicks the button
+            this,                                           // Receiver: This MainWindow instance
+            &MainWindow::handleRejectTransferClicked        // Slot: Rejects the pending incoming transfer
         );
 
         // Update the interface only after a peer completes a valid FileBridge handshake
         QObject::connect(   
-            &connectionManager_,                        // Manager that emits peer readiness
-            &ConnectionManager::peerReady,              // Signal emitted after handshake validation succeeds
-            this,                                       // Window that displays the connection state
-            &MainWindow::handlePeerReady                // Slot that marks the peer as ready
+            &connectionManager_,                            // Manager that emits peer readiness
+            &ConnectionManager::peerReady,                  // Signal emitted after handshake validation succeeds
+            this,                                           // Window that displays the connection state
+            &MainWindow::handlePeerReady                    // Slot that marks the peer as ready
         );
 
         // Display incoming transfers after TransferManager records their transfer state.
         QObject::connect(
-            &transferManager_,                          // Manager that owns transfer state.
-            &TransferManager::incomingTransferOffered,  // Signal emitted for a new pending transfer.
-            this,                                       // Window that displays the transfer.
-            &MainWindow::handleIncomingTransferOffered  // Slot that updates the interface.
+            &transferManager_,                              // Manager that owns transfer state.
+            &TransferManager::incomingTransferOffered,      // Signal emitted for a new pending transfer.
+            this,                                           // Window that displays the transfer.
+            &MainWindow::handleIncomingTransferOffered      // Slot that updates the interface.
         );
 
         // Display metadata after TransferManager successfully sends an outgoing file offer.
         QObject::connect(
-            &transferManager_,                          // Manager that owns transfer state.
-            &TransferManager::outgoingTransferOffered,  // Signal emitted after an offer is sent.
-            this,                                       // Window that displays the transfer.
-            &MainWindow::handleOutgoingTransferOffered  // Slot that updates the interface.
+            &transferManager_,                              // Manager that owns transfer state.
+            &TransferManager::outgoingTransferOffered,      // Signal emitted after an offer is sent.
+            this,                                           // Window that displays the transfer.
+            &MainWindow::handleOutgoingTransferOffered      // Slot that updates the interface.
         );
 
         // Report when the remote peer accepts an outgoing file transfer
         QObject::connect(
-            &transferManager_,                          // Sender: Manager that owns transfer state
-            &TransferManager::outgoingTransferAccepted, // Signal: Emitted when the remote peer accepts and offer
-            this,                                       // Receiver: This MainWindow instance
-            &MainWindow::handleOutgoingTransferAccepted // Slot: Updates the sender's transfer status
+            &transferManager_,                              // Sender: Manager that owns transfer state
+            &TransferManager::outgoingTransferAccepted,     // Signal: Emitted when the remote peer accepts and offer
+            this,                                           // Receiver: This MainWindow instance
+            &MainWindow::handleOutgoingTransferAccepted     // Slot: Updates the sender's transfer status
         );
 
         // Report when the remote peer rejects an outgoing file transfer
         QObject::connect(
-            &transferManager_,                          // Sender: Manager that owns transfer state
-            &TransferManager::outgoingTransferRejected, // Signal: Emitted when the remote peer rejects an offer
-            this,                                       // Receiver: This MainWindow instance
-            &MainWindow::handleOutgoingTransferRejected // Slot: Updates the sender's transfer status
+            &transferManager_,                              // Sender: Manager that owns transfer state
+            &TransferManager::outgoingTransferRejected,     // Signal: Emitted when the remote peer rejects an offer
+            this,                                           // Receiver: This MainWindow instance
+            &MainWindow::handleOutgoingTransferRejected     // Slot: Updates the sender's transfer status
+        );
+
+        // Report when all data for an outgoing transfer has been sent
+        QObject::connect(
+            &transferManager_,                              // Sender: Manager that owns transfer state
+            &TransferManager::outgoingTransferCompleted,    // Signal: Emitted after all file data and completion are sent
+            this,                                           // Receiver: This MainWindow instance
+            &MainWindow::handleOutgoingTransferCompleted    // Slot: Updates the receiver's completion status
+        );
+
+        // Report when an incoming transfer has been completely received and written.
+
+        QObject::connect(
+            &transferManager_,                              // Sender: Manager that owns transfer state.
+            &TransferManager::incomingTransferCompleted,    // Signal: Emitted after all expected file data is received.
+            this,                                           // Receiver: This MainWindow instance.
+            &MainWindow::handleIncomingTransferCompleted    // Slot: Updates the receiver's completion status.
         );
 
         // Use a central widget because QMainWindow reserves its outer structure for menus and toolbars
@@ -275,6 +292,31 @@ void MainWindow::handleOutgoingTransferRejected(std::uint64_t transferId) {
 
     // Inform the sender that the receiving peer declined the offered file
     statusLabel_->setText("Transfer rejected");
+}
+
+
+/**
+ * handleOutgoingTransferCompleted()
+ * Displays that an outgoing file transfer finished successfully.
+ */
+void MainWindow::handleOutgoingTransferCompleted(std::uint64_t transferId) {
+    // The transfer ID will be used for more detailed per-transfer UI later.
+    Q_UNUSED(transferId);
+
+    // Inform the sender that the file transfer finished successfully.
+    statusLabel_->setText("Transfer completed");
+}
+
+/**
+ * handleIncomingTransferCompleted()
+ * Displays that an incoming file transfer finished successfully.
+ */
+void MainWindow::handleIncomingTransferCompleted(std::uint64_t transferId) {
+    // The transfer ID will be used for more detailed per-transfer UI later.
+    Q_UNUSED(transferId);
+
+    // Inform the receiver that the complete file was received and written successfully.
+    statusLabel_->setText("Transfer completed");
 }
 
 

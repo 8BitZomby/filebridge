@@ -82,6 +82,18 @@ class MainWindow : public QMainWindow {
         void handleChooseFileClicked();
 
         /**
+         * handleOutgoingTransferCompleted()
+         * Displays that an outgoing file transfer finished successfully
+         */
+        void handleOutgoingTransferCompleted(std::uint64_t transferId);
+
+        /**
+         * handleIncomingTransferCompleted()
+         * Displays that an incoming file transfer finished successfully
+         */
+        void handleIncomingTransferCompleted(std::uint64_t transferId);
+
+        /**
          * handleConnectionFailed()
          * Displays an outgoing connection failure in the interface
          */

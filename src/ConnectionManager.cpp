@@ -166,6 +166,33 @@ bool ConnectionManager::sendFileData(PeerConnection *connection, const Protocol:
 
 
 /**
+ * sendFileComplete()
+ * Sends completion for one finished outgoing file transfer
+ */
+bool ConnectionManager::sendFileComplete(PeerConnection *connection, const Protocol::FileCompletePayload& complete) {
+    // Locate the managed state for the peer that should receive the completeion message
+    const auto peer = std::find_if(
+        connections_.begin(),
+        connections_.end(),
+        [connection](const ManagedPeer& managedPeer) {
+
+            return managedPeer.connection == connection;
+        }
+    );
+
+    // File-transfer messages may only be sent to validated FileBridge peers
+    if(peer == connections_.end() || !peer->handshakeReceived) {
+        return false;
+    }
+
+    // Build the complete FileComplete protocol message for the finished transfer
+    const Protocol::Message message = Protocol::makeFileCompleteMessage(complete);
+
+    return connection->sendMessage(message);
+}
+
+
+/**
  * listeningPort()
  * Returns the TCP port currently used for incoming peer connections
  */
@@ -386,7 +413,17 @@ void ConnectionManager::handleMessage(PeerConnection *connection, const Protocol
             emit fileDataReceived(connection, fileData);
             break;
         }
-        case Protocol::MessageType::FileComplete:
+        case Protocol::MessageType::FileComplete: {
+            Protocol::FileCompletePayload complete;
+            // Reject malformed completion messages before exposing them to transfer logic
+            if(!Protocol::deserializeFileCompletePayload(message.payload, complete)) {  
+                qDebug() << "Invalid FileComplete payload";
+                connection->disconnectFromPeer();
+                return;
+            }
+            emit fileCompleteReceived(connection, complete);
+            break;
+        }
         case Protocol::MessageType::Error:
             // Transfer-level handling will be added as each protocol message is implemented
             qDebug() << "Received unhandled message type:"
