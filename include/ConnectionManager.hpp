@@ -59,6 +59,12 @@ class ConnectionManager : public QObject {
         bool sendFileReject(PeerConnection *connection, const Protocol::FileRejectPayload& reject);
 
         /**
+         * sendFileData()
+         * Sends one chunk of file data to a validated peer
+         */
+        bool sendFileData(PeerConnection *connection, const Protocol::FileDataPayload& fileData);
+
+        /**
          * listeningPort()
          * Returns the TCP port currently used for incoming peer connections
          */
@@ -89,6 +95,12 @@ class ConnectionManager : public QObject {
          * Reports that a remote peer rejected one offered file transfer
          */
         void fileRejectReceived(PeerConnection *connection, const Protocol::FileRejectPayload& reject);
+
+        /**
+         * fileDataReceived()
+         * Reports one decoded chunk of file data received from a peer
+         */
+        void fileDataReceived(PeerConnection *connection, const Protocol::FileDataPayload& fileData);
 
         /**
          * peerDisconnected()

@@ -101,6 +101,9 @@ class MainWindow : public QMainWindow {
         // Identifies the incoming transfer currently awaiting a used decision
         std::uint64_t pendingIncomingTransferId_;
 
+        // Stores the original filename for the incoming transfer acaiting a user decision
+        QString pendingIncomingFileName_;
+
         // Displays the preferred local IPv4 address
         QLabel *localAddressLabel_;
 

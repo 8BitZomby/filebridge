@@ -2,7 +2,11 @@
 #include "ConnectionManager.hpp"
 #include "Protocol.hpp"
 
+#include <QDebug>
+#include <QDir>
+#include <QFile>
 #include <QFileInfo>
+#include <QStandardPaths>
 #include <cstdint>
 
 
@@ -13,6 +17,7 @@
 TransferManager::TransferManager(ConnectionManager *connectionManager, QObject *parent)
     : QObject(parent),
       connectionManager_(connectionManager),
+      downloadDirectory_(QStandardPaths::writableLocation(QStandardPaths::DownloadLocation)),
       nextTransferId_(1) {
     
     // Receive validated FileOffer messages from the connection layer.
@@ -41,6 +46,32 @@ TransferManager::TransferManager(ConnectionManager *connectionManager, QObject *
         this,                                               // Receiver: This TransferManager instance
         &TransferManager::handleFileRejectReceived          // Slot: Handles the rejected outgoing transfer
     );
+
+    // Receive file-data chunks for accepted incoming transfers
+    QObject::connect(
+        connectionManager_,                                 // Sender: ConnectionManager that received the protocol message
+        &ConnectionManager::fileDataReceived,               // Signal: Emitted when a valid FileData message is received
+        this,                                               // Receiver: This TransferManager instance
+        &TransferManager::handleFileDataReceived            // Slot: Validates and records the incoming chunk
+    );
+}
+
+
+/**
+ * downloadDirectory()
+ * Returns the directory where accepted incoming files are saved.
+ */
+QString TransferManager::downloadDirectory() const {
+    return downloadDirectory_;
+}
+
+
+/**
+ * setDownloadDirectory()
+ * Changes the directory where accepted incoming files are saved.
+ */
+void TransferManager::setDownloadDirectory(const QString& directory) {
+    downloadDirectory_ = directory;
 }
 
 
@@ -77,12 +108,13 @@ bool TransferManager::offerFile(PeerConnection *connection, const QString& fileP
         return false;
     }
 
-    // Remember the local path so an eventual FileAccept can identify which file to transmit
+    // Remember the local file and peer so later transfer reponses can be matched correctly
     outgoingTransfers_.emplace(
         transferId,
         OutgoingTransfer {
             transferId,
-            filePath
+            filePath,
+            connection
         }
     );
 
@@ -99,9 +131,12 @@ bool TransferManager::offerFile(PeerConnection *connection, const QString& fileP
 
 /**
  * acceptIncomingTransfer()
- * Accepts one pending incoming transfer and notifies the sending peer.
+ * Accepts one pending incoming transfer, using an optional destination directory override.
  */
-bool TransferManager::acceptIncomingTransfer(std::uint64_t transferId) {
+bool TransferManager::acceptIncomingTransfer(
+    std::uint64_t transferId,
+    const QString& destinationDirectory
+) {
     // Locate the incoming transfer that the user wants to accept.
     const auto transfer = incomingTransfers_.find(transferId);
 
@@ -110,16 +145,34 @@ bool TransferManager::acceptIncomingTransfer(std::uint64_t transferId) {
         return false;
     }
 
-    // Build the protocol payload identifying the accepted transfer.
-    const Protocol::FileAcceptPayload accept {transferId};
+    // Use the provided directory when one was specified; otherwise use FileBridge's configured default.
+    const QString targetDirectory =
+        destinationDirectory.isEmpty()
+            ? downloadDirectory_
+            : destinationDirectory;
 
-    // Notify the peer that this transfer has been accepted.
-    if(!connectionManager_->sendFileAccept(transfer->second.connection, accept)) {
+    // A transfer cannot be accepted if no usable destination directory is available.
+    if(targetDirectory.isEmpty()) {
         return false;
     }
 
-    // The transfer is no longer waiting for an accept/reject decision.
-    incomingTransfers_.erase(transfer);
+    // Build the complete destination path from the chosen directory and original filename.
+    transfer->second.destinationPath = createUniqueDestinationPath(targetDirectory, transfer->second.fileName);
+
+    // Build the protocol payload identifying the accepted transfer.
+    const Protocol::FileAcceptPayload accept {
+        transferId
+    };
+
+    // Notify the sender only after the destination path has been established.
+    if(!connectionManager_->sendFileAccept(
+        transfer->second.connection,
+        accept
+    )) {
+        // Clear the destination because the transfer was not successfully accepted.
+        transfer->second.destinationPath.clear();
+        return false;
+    }
 
     return true;
 }
@@ -173,7 +226,9 @@ void TransferManager::handleFileOfferReceived(PeerConnection *connection, const 
     const IncomingTransfer transfer {
         offer.transferId,
         offer.fileName,
+        QString(),
         offer.fileSize,
+        0,
         connection
     };
 
@@ -189,20 +244,32 @@ void TransferManager::handleFileOfferReceived(PeerConnection *connection, const 
 
 /**
  * handleFileAcceptReceived()
- * Upddates outgoing transfer state after the remote peer accepts an offer
+ * Starts sending file contents after the remote peer accepts an outgoing transfer.
  */
 void TransferManager::handleFileAcceptReceived(PeerConnection *connection, const Protocol::FileAcceptPayload& accept) {
+    // Locate the outgoing transfer identified by the acceptance message.
     const auto transfer = outgoingTransfers_.find(accept.transferId);
 
-    // Ignore responses that do not match a known outgoing transfer
+    // Reject responses that do not correspond to a known outgoing transfer.
     if(transfer == outgoingTransfers_.end()) {
+        qDebug() << "FileAccept rejected: outgoing transfer was not found";
         return;
     }
 
-    // TEMPORARY: Notify compiler that connection is currently unused in this function
-    Q_UNUSED(connection);
-    // Emit a signal so the GUI can report that the outgoing transfer was accepted
+    // Reject an acceptance response that came from a different peer than the original offer.
+    if(transfer->second.connection != connection) {
+        qDebug() << "FileAccept rejected: response came from unexpected peer";
+        return;
+    }
+
+    // Notify the GUI that the remote peer accepted the offered file.
     emit outgoingTransferAccepted(accept.transferId);
+
+    // Begin sending the accepted file as a sequence of FileData messages.
+    if(!sendFileContents(transfer->second)) {
+        qDebug() << "Failed to send accepted file contents";
+        return;
+    }
 }
 
 
@@ -224,6 +291,177 @@ void TransferManager::handleFileRejectReceived(PeerConnection *connection, const
     outgoingTransfers_.erase(transfer);
     // Emit a signal to the GUI can report that the outgoing transfer was rejected
     emit outgoingTransferRejected(reject.transferId);
+}
+
+
+/**
+ * handleFileDataReceived()
+ * Validates and writes one incoming file-data chunk to its destination file.
+ */
+void TransferManager::handleFileDataReceived(
+    PeerConnection *connection,
+    const Protocol::FileDataPayload& fileData
+) {
+    // Locate the incoming transfer identified by this FileData message.
+    const auto transfer = incomingTransfers_.find(fileData.transferId);
+
+    if(transfer == incomingTransfers_.end()) {
+        qDebug() << "FileData rejected: unknown transfer ID" << fileData.transferId;
+        return;
+    }
+
+    // Reject data that came from a different peer than the one that offered the file.
+    if(transfer->second.connection != connection) {
+        qDebug() << "FileData rejected: unexpected peer";
+        return;
+    }
+
+    // Require chunks to arrive exactly where the previous chunk ended.
+    if(fileData.offset != transfer->second.bytesReceived) {
+        qDebug() << "FileData rejected: unexpected offset"
+                 << "expected =" << transfer->second.bytesReceived
+                 << "received =" << fileData.offset;
+        return;
+    }
+
+    // Determine how many raw file bytes are contained in this chunk.
+    const std::uint64_t chunkSize =
+        static_cast<std::uint64_t>(fileData.data.size());
+
+    // Reject a chunk that would exceed the file size declared in the original offer.
+    if(chunkSize > transfer->second.fileSize - transfer->second.bytesReceived) {
+        qDebug() << "FileData rejected: chunk exceeds offered file size";
+        return;
+    }
+
+    // File data cannot be written until a destination path has been established.
+    if(transfer->second.destinationPath.isEmpty()) {
+        qDebug() << "FileData rejected: destination path is empty";
+        return;
+    }
+
+    // Open the destination file without discarding chunks that were already written.
+    QFile destinationFile(transfer->second.destinationPath);
+
+    if(!destinationFile.open(QIODevice::ReadWrite)) {
+        qDebug() << "Failed to open destination file:"
+                 << destinationFile.errorString();
+        return;
+    }
+
+    // Position the file cursor at the exact byte offset represented by this chunk.
+    if(!destinationFile.seek(static_cast<qint64>(fileData.offset))) {
+        qDebug() << "Failed to seek destination file:"
+                 << destinationFile.errorString();
+        return;
+    }
+
+    // Write the complete chunk to disk.
+    const qint64 bytesWritten = destinationFile.write(fileData.data);
+
+    if(bytesWritten != fileData.data.size()) {
+        qDebug() << "Failed to write complete chunk:"
+                 << "expected =" << fileData.data.size()
+                 << "written =" << bytesWritten
+                 << "error =" << destinationFile.errorString();
+        return;
+    }
+
+    // Record the exact number of file bytes successfully written so far.
+    transfer->second.bytesReceived += chunkSize;
+}
+
+
+/**
+ * sendFileContents()
+ * Reads one accepted local file in chunks and sends each chunk to the peer.
+ */
+bool TransferManager::sendFileContents(const OutgoingTransfer& transfer) {
+    // Open the original local file for read-only binary access.
+    QFile file(transfer.filePath);
+
+    if(!file.open(QIODevice::ReadOnly)) {
+        qDebug() << "Failed to open source file:" << file.errorString();
+        return false;
+    }
+
+    // Keep individual protocol messages reasonably small instead of loading the entire file at once.
+    constexpr qint64 CHUNK_SIZE = 64 * 1024;
+
+    std::uint64_t offset = 0;
+
+    // Read and send the file sequentially until no bytes remain.
+    while(!file.atEnd()) {
+        const QByteArray chunk = file.read(CHUNK_SIZE);
+
+        // An unexpected empty chunk indicates that reading failed before EOF.
+        if(chunk.isEmpty()) {
+            if(file.atEnd()) {
+                break;
+            }
+
+            qDebug() << "Failed while reading source file:" << file.errorString();
+            return false;
+        }
+
+        // Identify both the transfer and exact byte position represented by this chunk.
+        const Protocol::FileDataPayload fileData {
+            transfer.transferId,
+            offset,
+            chunk
+        };
+
+        // Stop immediately if the network layer cannot queue this chunk for transmission.
+        if(!connectionManager_->sendFileData(transfer.connection, fileData)) {
+            qDebug() << "Failed to send FileData chunk";
+            return false;
+        }
+
+        // Advance the offset by the exact number of raw file bytes just sent.
+        offset += static_cast<std::uint64_t>(chunk.size());
+    }
+    return true;
+}
+
+
+/**
+ * createUniqueDestinationPath()
+ * Builds an unused destination path by adding " (n)" before the file extension
+ * when needed
+ */
+QString TransferManager::createUniqueDestinationPath(const QString& directory, const QString& fileName) const {
+    const QDir destinationDirectory(directory);
+
+    // Use the original filename when no file with that name already exists
+    const QString originalPath = destinationDirectory.filePath(fileName);
+
+    if(!QFileInfo::exists(originalPath)) {
+        return originalPath;
+    }
+
+    const QFileInfo fileInfo(fileName);
+
+    // Preserve the complete extension while adding the numeric suffix to the base name
+    const QString baseName = fileInfo.completeBaseName();
+    const QString suffix = fileInfo.completeSuffix();
+    std::uint64_t copyNumber = 1;
+
+    // Increment the suffix until an unused filename is found
+    while(true) {
+        QString candidateName = baseName + " (" + QString::number(copyNumber) + ")";
+
+        // Add the original extension only when the file actually has one
+        if(!suffix.isEmpty()) {
+            candidateName += "." + suffix;
+        }
+
+        const QString candidatePath = destinationDirectory.filePath(candidateName);
+
+        if(!QFileInfo::exists(candidatePath)) {
+            return candidatePath;
+        }
+        ++copyNumber;
+    }
 }
 
 

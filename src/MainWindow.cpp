@@ -5,6 +5,7 @@
 
 #include <QFileDialog>
 #include <QHostAddress>
+#include <QStandardPaths>
 #include <QIntValidator>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -211,12 +212,9 @@ void MainWindow::handlePeerReady(PeerConnection *connection) {
  * Opens a file picker and asks the transfer manager to offer the selected file.
  */
 void MainWindow::handleChooseFileClicked() {
-    // Ask the user to select one existing file from the local filesystem.
-    const QString filePath = QFileDialog::getOpenFileName(
-        this,
-        "Choose File to Send"
-    );
-
+    // Open file chooser to select file to send
+    const QString filePath = QFileDialog::getOpenFileName(this, "Choose file to send");
+    
     // Closing the dialog without selecting a file is not an error.
     if(filePath.isEmpty()) {
         return;
@@ -287,6 +285,9 @@ void MainWindow::handleOutgoingTransferRejected(std::uint64_t transferId) {
 void MainWindow::handleIncomingTransferOffered(const TransferManager::IncomingTransfer& transfer) {
     // Remember which transfer the Accept and Reject buttons should operate on
     pendingIncomingTransferId_ = transfer.transferId;
+    
+    // Remember the offered filename so the save dialog can suggest it later
+    pendingIncomingFileName_ = transfer.fileName;
 
     // Allow the user to respond to the newly received file offer
     acceptTransferButton_->setEnabled(true);
@@ -305,22 +306,24 @@ void MainWindow::handleIncomingTransferOffered(const TransferManager::IncomingTr
 
 /**
  * handleAcceptTransferClicked()
- * Accepts the currently displayed incoming transfer
+ * Accepts the currently displayed incoming transfer using the configured download directory.
  */
 void MainWindow::handleAcceptTransferClicked() {
-    // A zero identifier means there is no incoming transfer awaiting a decision
+    // A zero identifier means there is no incoming transfer awaiting a decision.
     if(pendingIncomingTransferId_ == 0) {
         return;
     }
 
-    // Ask TransferManager to send the FaileAccept response to the original sender
+    // Accept the transfer using TransferManager's configured default download directory.
     if(!transferManager_.acceptIncomingTransfer(pendingIncomingTransferId_)) {
         statusLabel_->setText("Failed to accept incoming transfer");
         return;
     }
 
-    // The offer is no longer awaiting an Accept or reject Decision
+    // The offer is no longer awaiting an Accept or Reject decision.
     pendingIncomingTransferId_ = 0;
+    pendingIncomingFileName_.clear();
+
     acceptTransferButton_->setEnabled(false);
     rejectTransferButton_->setEnabled(false);
 
@@ -346,6 +349,7 @@ void MainWindow::handleRejectTransferClicked() {
 
     // The rejected offer no longer needs a pending user decision
     pendingIncomingTransferId_ = 0;
+    pendingIncomingFileName_.clear();
     acceptTransferButton_->setEnabled(false);
     rejectTransferButton_->setEnabled(false);
 

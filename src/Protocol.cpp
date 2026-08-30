@@ -311,13 +311,103 @@ bool Protocol::deserializeFileRejectPayload(const QByteArray& data, FileRejectPa
 
 
 /**
+ * serializeFileDataPayload()
+ * Encodes one file-data chunk into the payload bytes of a FileData message
+ */
+QByteArray Protocol::serializeFileDataPayload(const FileDataPayload& fileData) {
+    QByteArray data;
+    QDataStream stream(&data, QIODevice::WriteOnly);
+
+    // Use the same byte order as the rest of the FileBridge protocol
+    stream.setByteOrder(QDataStream::BigEndian);
+    // Pin Qt's serialization format so different Qt 6 releases use the same wire representation
+    stream. setVersion(QDataStream::Qt_6_0);
+
+    // Write the transfer identifier first so the receiver knows which file own this chunk
+    stream << fileData.transferId;
+
+    // Write the byte offset so the receiver knows where this chunk belongs in the file
+    stream << fileData.offset;
+
+    // Write the raw file bytes for this chunk
+    stream << fileData.data;
+
+    return data;
+}
+
+
+/**
+ * deserializeFileDataPayload()
+ * Decodes the payload bytes of a FileData message into one file-data chunk
+ */
+bool Protocol::deserializeFileDataPayload(const QByteArray& data, FileDataPayload& fileData) {
+    QDataStream stream(data);
+
+    // Match the byte order used when serializing FileData payloads
+    stream.setByteOrder(QDataStream::BigEndian);
+    // Pin Qt's serialization format so different Qt 6 releases use the same wire representation
+    stream.setVersion(QDataStream::Qt_6_0);
+
+    // Read into temp values so the output object is unchanged if decoding fails
+    std::uint64_t transferId = 0;
+    std::uint64_t offset = 0;
+    QByteArray chunkData;
+
+    // Fields must be read in exactly the same order in which they were serialized
+    stream >> transferId;
+    stream >> offset;
+    stream >> chunkData;
+
+    // Reject truncated or otherwise malformed payload data
+    if(stream.status() != QDataStream::Ok) {
+        return false;
+    }
+
+    // Store the decoded values only after the complete payload was read successfully
+    fileData.transferId = transferId;
+    fileData.offset = offset;
+    fileData.data = chunkData;
+
+    return true;
+}
+
+
+/**
+ * makeFileDataMessage()
+ * Builds a complete FileData message from one file-data chunk
+ */
+Protocol::Message Protocol::makeFileDataMessage(const FileDataPayload &fileData) {
+    // Encode the chunk metadata and raw file bytes before adding common FileBridge framing
+    const QByteArray payload = serializeFileDataPayload(fileData);
+
+    // Aggregate initialization equivalent to:
+    // Protocol::Message {
+    //     Protocol::MessageHeader {messageType, payloadSize},
+    //     payload
+    // }
+    return {
+        {
+            MessageType::FileData,
+            static_cast<std::uint64_t>(payload.size())
+        },
+        payload
+    };
+}
+
+
+/**
  * makeFileOfferMessage()
  * Builds a complete FileOffer message from structured file metadata
  */
 Protocol::Message Protocol::makeFileOfferMessage(const FileOfferPayload& offer) {
     // Encode the message-specific meafata before adding the common FileBridge framing
     const QByteArray payload = serializeFileOfferPayload(offer);
-
+    
+    // Aggregate initialization equivalent to:
+    // Protocol::Message {
+    //     Protocol::MessageHeader {messageType, payloadSize},
+    //     payload
+    // }
     return {
         {
             MessageType::FileOffer,
@@ -336,6 +426,11 @@ Protocol::Message Protocol::makeFileAcceptMessage(const FileAcceptPayload& accep
     // Encode the accepted transfer identifier before adding the common FileBridge framing
     const QByteArray payload = serializeFileAcceptPayload(accept);
 
+    // Aggregate initialization equivalent to:
+    // Protocol::Message {
+    //     Protocol::MessageHeader {messageType, payloadSize},
+    //     payload
+    // }
     return {
         {
             MessageType::FileAccept,
@@ -354,6 +449,11 @@ Protocol::Message Protocol::makeFileRejectMessage(const FileRejectPayload& rejec
     // Encode the rejected transfer identifier before adding the common FileBridge framing
     const QByteArray payload = serializeFileRejectPayload(reject);
 
+    // Aggregate initialization equivalent to:
+    // Protocol::Message {
+    //     Protocol::MessageHeader {messageType, payloadSize},
+    //     payload
+    // }
     return {
         {
             MessageType::FileReject,

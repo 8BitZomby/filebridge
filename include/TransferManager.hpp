@@ -21,7 +21,7 @@ class TransferManager : public QObject {
 
         /**
          * IncomingTransfer
-         * Stores metadata for a file offered by a remote peer.
+         * Stores metadata and receive state for a file offered by a remote peer.
          */
         struct IncomingTransfer {
             // Unique identifier assigned by the sending peer.
@@ -30,8 +30,14 @@ class TransferManager : public QObject {
             // Original file name reported by the sender.
             QString fileName;
 
+            // Full local filesystem path where received file data will be written
+            QString destinationPath;
+
             // Total file size in bytes.
             std::uint64_t fileSize;
+
+            // Number of file bytes sucessfully received for this transfer so far
+            std::uint64_t bytesReceived;
 
             // Peer that offered the file.
             PeerConnection *connection;
@@ -44,6 +50,18 @@ class TransferManager : public QObject {
         explicit TransferManager(ConnectionManager *ConnectionManager, QObject *parent = nullptr);
 
         /**
+         * downloadDirectory()
+         * Returns the directory where accepted incoming files are saved.
+         */
+        QString downloadDirectory() const;
+
+        /**
+         * setDownloadDirectory()
+         * Changes the directory where accepted incoming files are saved.
+         */
+        void setDownloadDirectory(const QString& directory);
+        
+        /**
          * offerFile()
          * Creates and sends a new file-transfer offer to a ready peer
          */
@@ -51,9 +69,10 @@ class TransferManager : public QObject {
 
         /**
          * acceptIncomingTransfer()
-         * Accepts one pending incoming transfer and notifies the sending peer.
+         * Accepts one pending incoming transfer, using an optional destination directory
+         * override
          */
-        bool acceptIncomingTransfer(std::uint64_t transferId);
+        bool acceptIncomingTransfer(std::uint64_t transferId, const QString& destinationDirectory = QString());
 
         /**
          * rejectIncomingTransfer()
@@ -107,6 +126,12 @@ class TransferManager : public QObject {
          */
         void handleFileRejectReceived(PeerConnection *connection, const Protocol::FileRejectPayload& reject);
 
+        /**
+         * handleFileDataReceived()
+         * Validates and records one incoming file-data chunk
+         */
+        void handleFileDataReceived(PeerConnection *connection, const Protocol::FileDataPayload& fileData);
+
     private:
 
         /**
@@ -119,7 +144,23 @@ class TransferManager : public QObject {
 
             // Full local filesystem path used when the file contents are eventually transmitted
             QString filePath;
+
+            // Peer that accepted and will receive this outgoing transfer
+            PeerConnection *connection;
         };
+
+        /**
+         * sendFileContents()
+         * Reads one accepted local file in chunks and sends each chunk to the peer
+         */
+        bool sendFileContents(const OutgoingTransfer& transfer);
+
+        /**
+         * createUniqueDestinationPath()
+         * Builds an unused destination path by adding " (n)" before the file extension
+         * when needed
+         */
+        QString createUniqueDestinationPath(const QString& direectory, const QString& fileName) const;
 
         /**
          * generateTransferId()
@@ -129,6 +170,9 @@ class TransferManager : public QObject {
 
         // Connection layer used to send transfer-related protocol messages
         ConnectionManager *connectionManager_;
+
+        // Directory where accepted incoming files are saved by default.
+        QString downloadDirectory_;
 
         // Next monotonically increasing identifier assigned to a local outgoing transfer
         std::uint64_t nextTransferId_;

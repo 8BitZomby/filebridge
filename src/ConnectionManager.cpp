@@ -139,6 +139,33 @@ bool ConnectionManager::sendFileReject(PeerConnection *connection, const Protoco
 
 
 /**
+ * sendFileData()
+ * Sends one chunk of file data to a validated peer
+ */
+bool ConnectionManager::sendFileData(PeerConnection *connection, const Protocol::FileDataPayload& fileData) {
+    // Locate the managed state for the peer that should receive the file chunk
+    const auto peer = std::find_if(
+        connections_.begin(),
+        connections_.end(),
+        [connection](const ManagedPeer& managedPeer) {
+
+            return managedPeer.connection == connection;
+        }
+    );
+
+    // File data may only be sent to peers that completed the handshake
+    if(peer == connections_.end() || !peer->handshakeReceived) {
+        return false;
+    }
+
+    // Build the complete FileData protocol message from the provided chunk
+    const Protocol::Message message = Protocol::makeFileDataMessage(fileData);
+
+    return connection->sendMessage(message);
+}
+
+
+/**
  * listeningPort()
  * Returns the TCP port currently used for incoming peer connections
  */
@@ -348,7 +375,17 @@ void ConnectionManager::handleMessage(PeerConnection *connection, const Protocol
             break;
         }
 
-        case Protocol::MessageType::FileData: 
+        case Protocol::MessageType::FileData: {
+            Protocol::FileDataPayload fileData;
+            // Reject malformed file-data payloads before exposing them to transfer logic
+            if(!Protocol::deserializeFileDataPayload(message.payload, fileData)) {
+                qDebug() << "Invalid FileData payload";
+                connection->disconnectFromPeer();
+                return;
+            }
+            emit fileDataReceived(connection, fileData);
+            break;
+        }
         case Protocol::MessageType::FileComplete:
         case Protocol::MessageType::Error:
             // Transfer-level handling will be added as each protocol message is implemented

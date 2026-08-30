@@ -105,6 +105,21 @@ namespace Protocol {
     };
 
     /**
+     * FileDataPayload
+     * Carries one chunk of file contents for an accepted transfer
+     */
+    struct FileDataPayload {
+        // Identifies which accepted transfer this chunk belongs to
+        std::uint64_t transferId;
+
+        // Zero-based byte offset where this chunk belongs in the file
+        std::uint64_t offset;
+
+        // Raw file bytes contained in this chunk
+        QByteArray data;
+    };
+
+    /**
      * serializeHeader()
      * Encodes a message header into its platform-independent wire representation
      */
@@ -177,6 +192,18 @@ namespace Protocol {
     bool deserializeFileRejectPayload(const QByteArray& data, FileRejectPayload& reject);
 
     /**
+     * serializeFileDataPayload()
+     * Encodes one file-data chunk into the payload bytes of a FileData message
+     */
+    QByteArray serializeFileDataPayload(const FileDataPayload& fileData);
+
+    /**
+     * deserializeFileDataPayload()
+     * Decodes the payload bytes of a FileData message into one file-data chunk
+     */
+    bool deserializeFileDataPayload(const QByteArray& data, FileDataPayload& fileData);
+
+    /**
      * makeFileOfferMessage()
      * Builds a complete FileOffer message from structured file metadata
      */
@@ -193,6 +220,12 @@ namespace Protocol {
      * Builds a complete FileReject message for the specified transfer
      */
     Message makeFileRejectMessage(const FileRejectPayload& reject);
+
+    /**
+     * makeFileDataMessage()
+     * Builds a complete FileData message from one file-data chunk
+     */
+    Message makeFileDataMessage(const FileDataPayload& fileData);
 
     /**
      * serializeMessage()
