@@ -59,6 +59,38 @@ void ConnectionManager::connectToPeer(const QHostAddress& address, std::uint16_t
 
 
 /**
+ * disconnectPeer()
+ * Disconnects an established peer currently managed by FileBridge
+ */
+bool ConnectionManager::disconnectPeer(PeerConnection *connection) {
+    // Reject null pointers before searching the managed connection collection
+    if(connection == nullptr) {
+        return false;
+    }
+
+    const auto peer = std::find_if(
+        connections_.begin(),
+        connections_.end(),
+        [connection](const ManagedPeer& managedPeer) {
+
+            return managedPeer.connection == connection;
+        }
+    );
+
+    // Only connections currently owned by ConnectionManager may be disconnected here
+    if(peer == connections_.end()) {
+        return false;
+    }
+
+    // Ask PeerConnection to close its underlying TCP connection
+    // The existing disconnected signal will perform normal cleanup afterward
+    connection->disconnectFromPeer();
+
+    return true;
+}
+
+
+/**
  * sendFileOffer()
  * Sends metadata for one proposed file transfer to a ready peer
  */

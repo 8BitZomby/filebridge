@@ -1,6 +1,7 @@
 #include "MainWindow.hpp"
 #include "ConnectionManager.hpp"
 #include "NetworkInfo.hpp"
+#include "PeerDiscovery.hpp"
 #include "Protocol.hpp"
 
 #include <QFileDialog>
@@ -18,6 +19,7 @@
  */
 MainWindow::MainWindow(QWidget *parent) : 
     QMainWindow(parent),
+    peerDiscovery_(nullptr),
     transferManager_(&connectionManager_, this),
     activePeer_(nullptr),
     pendingIncomingTransferId_(0),
@@ -25,7 +27,9 @@ MainWindow::MainWindow(QWidget *parent) :
     localPortLabel_(new QLabel(this)),
     remoteAddressEdit_(new QLineEdit(this)),
     remotePortEdit_(new QLineEdit(this)),
+    nearbyDevicesList_(new QListWidget(this)),
     connectButton_(new QPushButton("Connect", this)),
+    disconnectButton_(new QPushButton("Disconnect", this)),
     chooseFileButton_(new QPushButton("Choose File", this)),
     acceptTransferButton_(new QPushButton("Accept", this)),
     rejectTransferButton_(new QPushButton("Reject", this)),
@@ -35,6 +39,34 @@ MainWindow::MainWindow(QWidget *parent) :
         if(!connectionManager_.start()) {
             statusLabel_->setText("Failed to start local listener");
             connectButton_->setEnabled(false);
+        }
+        else {
+            // Create LAN discovery using the TCP port assigned by ConnectionManager
+            peerDiscovery_ = new PeerDiscovery(
+                connectionManager_.listeningPort(), // listeningPort: TCP port nearby peers should use to connect to this instance
+                this                                // parent: MainWindow owns and destroys the PeerDiscovery object
+            );
+
+            // Add newly discovered FileBridge instances to the nearby-devices list.
+            QObject::connect(
+                peerDiscovery_,                         // Sender: Service tracking FileBridge instances on the local network.
+                &PeerDiscovery::peerDiscovered,         // Signal: Emitted when a previously unknown peer is first discovered.
+                this,                                   // Receiver: This MainWindow instance.
+                &MainWindow::handlePeerDiscovered       // Slot: Adds the discovered peer to the visible device list.
+            );
+
+            // Remove devices that stop sending discovery heartbeats.
+            QObject::connect(
+                peerDiscovery_,                         // Sender: Service tracking FileBridge instances on the local network.
+                &PeerDiscovery::peerLost,               // Signal: Emitted when a known peer exceeds the heartbeat timeout.
+                this,                                   // Receiver: This MainWindow instance.
+                &MainWindow::handlePeerLost             // Slot: Removes the expired peer from the visible device list.
+            );
+
+            // Start receiving and periodically broadcasting FileBridge discovery announcements
+            if(!peerDiscovery_->start()) {
+                qDebug() << "Failed to start peer discovery";
+            }
         }
 
         // Display the preferred local IPv4 address that another device can use to connect
@@ -56,8 +88,14 @@ MainWindow::MainWindow(QWidget *parent) :
         remoteAddressEdit_->setPlaceholderText("192.168.0.10");
         remotePortEdit_->setPlaceholderText("Port");
 
+        // Make nearby devices list small but scrollable if more devices show up
+        nearbyDevicesList_->setMaximumHeight(50);
+
         // File offers are only valid after a peer completes the FileBridge handshake
         chooseFileButton_->setEnabled(false);
+
+        // Disconnect is only available after a peer completes the FileBridge handshake
+        disconnectButton_->setEnabled(false);
 
         // Accept and Reject are only available while an incoming transfer is awaiting a decision
         acceptTransferButton_->setEnabled(false);
@@ -69,6 +107,22 @@ MainWindow::MainWindow(QWidget *parent) :
             &QPushButton::clicked,                          // Signal emitted when the button is pressed
             this,                                           // Window that handles the action
             &MainWindow::handleConnectClicked               // Slot that validates and connects to the peer
+        );
+
+        // End the active peer connection when the user presses Disconnect.
+        QObject::connect(
+            disconnectButton_,                              // Sender: Disconnect button in the FileBridge window.
+            &QPushButton::clicked,                          // Signal: Emitted when the user clicks Disconnect.
+            this,                                           // Receiver: This MainWindow instance.
+            &MainWindow::handleDisconnectClicked            // Slot: Requests disconnection of the active peer.
+        );
+
+        // Start a connection request when the user double-clicks a discovered device.
+        QObject::connect(
+            nearbyDevicesList_,                             // Sender: List displaying discovered FileBridge devices.
+            &QListWidget::itemDoubleClicked,                // Signal: Emitted when the user double-clicks one device entry.
+            this,                                           // Receiver: This MainWindow instance.
+            &MainWindow::handleNearbyDeviceDoubleClicked    // Slot: Connects using the selected peer's stored address and port.
         );
 
         // Open the file picker when the user chooses to prepare for a transfer
@@ -101,6 +155,14 @@ MainWindow::MainWindow(QWidget *parent) :
             &ConnectionManager::peerReady,                  // Signal emitted after handshake validation succeeds
             this,                                           // Window that displays the connection state
             &MainWindow::handlePeerReady                    // Slot that marks the peer as ready
+        );
+
+        // Reset the interface when an established FileBridge peer disconnects.
+        QObject::connect(
+            &connectionManager_,                            // Sender: Manager tracking established FileBridge peers.
+            &ConnectionManager::peerDisconnected,           // Signal: Emitted when a managed peer connection ends.
+            this,                                           // Receiver: This MainWindow instance.
+            &MainWindow::handlePeerDisconnected             // Slot: Clears the active-peer state when appropriate.
         );
 
         // Display incoming transfers after TransferManager records their transfer state.
@@ -162,10 +224,14 @@ MainWindow::MainWindow(QWidget *parent) :
         layout->addWidget(new QLabel("Port:", centralWidget));
         layout->addWidget(localPortLabel_);
 
+        layout->addWidget(new QLabel("Nearby devices:", centralWidget));
+        layout->addWidget(nearbyDevicesList_);
+
         layout->addWidget(new QLabel("Connect to peer:", centralWidget));
         layout->addWidget(remoteAddressEdit_);
         layout->addWidget(remotePortEdit_);
         layout->addWidget(connectButton_);
+        layout->addWidget(disconnectButton_);
 
         layout->addWidget(new QLabel("File transfer:", centralWidget));
         layout->addWidget(chooseFileButton_);
@@ -187,6 +253,15 @@ MainWindow::MainWindow(QWidget *parent) :
  * Validates the entered peer address and starts an outgoing connection
  */
 void MainWindow::handleConnectClicked() {
+    // Prefer a discovered peer when the user has selected one in the nearby-devices list
+    QListWidgetItem *selectedPeer = nearbyDevicesList_->currentItem();
+
+    if(selectedPeer != nullptr) {
+        connectToNearbyDevice(selectedPeer);
+        return;
+    }
+
+    // No discovered peer is selected, so use the manually entered fallback address and port
     const QHostAddress remoteAddress(remoteAddressEdit_->text());
 
     bool validPort = false;
@@ -209,6 +284,30 @@ void MainWindow::handleConnectClicked() {
 
 
 /**
+ * handleDisconnectClicked()
+ * Disconnects the currently active FileBridge peer.
+ */
+void MainWindow::handleDisconnectClicked() {
+    // A null activePeer_ means this window does not currently have a validated peer to disconnect.
+    if(activePeer_ == nullptr) {
+        return;
+    }
+
+    statusLabel_->setText("Disconnecting...");
+    disconnectButton_->setEnabled(false);
+
+    // ConnectionManager owns the peer lifecycle and will emit peerDisconnected
+    // when the underlying TCP connection actually ends.
+    if(!connectionManager_.disconnectPeer(activePeer_)) {
+        statusLabel_->setText("Failed to disconnect");
+        disconnectButton_->setEnabled(true);
+    }
+}
+
+
+
+
+/**
  * handlePeerReady()
  * Updates the interface after a peer completes the FileBridge handshake
  */
@@ -218,9 +317,35 @@ void MainWindow::handlePeerReady(PeerConnection *connection) {
 
     statusLabel_->setText("Connected");
     connectButton_->setEnabled(false);
+    disconnectButton_->setEnabled(true);
 
     // File selection becomes available only after the peer is ready for transfer messages
     chooseFileButton_->setEnabled(true);
+}
+
+
+/**
+ * handlePeerDisconnected()
+ * Updates the interface after the active FileBridge peer disconnects.
+ */
+void MainWindow::handlePeerDisconnected(PeerConnection *connection) {
+    // ConnectionManager can report any managed peer. Only reset this window's
+    // active connection state when the disconnected peer is the one currently in use.
+    if(connection != activePeer_) {
+        return;
+    }
+
+    // The PeerConnection will be destroyed by ConnectionManager after this signal returns.
+    activePeer_ = nullptr;
+  
+    statusLabel_->setText("Disconnected");
+    connectButton_->setEnabled(true);
+    disconnectButton_->setEnabled(false);
+    chooseFileButton_->setEnabled(false);
+
+    // A disconnected peer cannot have an actionable transfer decision in this window.
+    acceptTransferButton_->setEnabled(false);
+    rejectTransferButton_->setEnabled(false);
 }
 
 
@@ -406,4 +531,100 @@ void MainWindow::handleRejectTransferClicked() {
 void MainWindow::handleConnectionFailed(const QString& errorMessage) {
     statusLabel_->setText("Connection failed:" + errorMessage);
     connectButton_->setEnabled(true);
+}
+
+
+/**
+ * handlePeerDiscovered()
+ * Adds a newly discovered FileBridge instance to the nearby-devices list.
+ */
+void MainWindow::handlePeerDiscovered(const DiscoveredPeer& peer) {
+    // Create one visible entry for the newly discovered FileBridge instance.
+    QListWidgetItem *item = new QListWidgetItem(
+        peer.deviceName + " - " + peer.address.toString(),
+        nearbyDevicesList_
+    );
+    // Store the unique running-instance ID inside the list item itself.
+    // Qt::UserRole is reserved for application-specific data that is not displayed to the user.
+    item->setData(
+        NEARBY_DEVICE_INSTANCE_ID_ROLE,     // Role: Hidden field reserved for this peer's running-instance ID
+        peer.instanceId                     // Value: Unique ID generated by the remote FileBridge process
+    );
+
+    item->setData(
+        NEARBY_DEVICE_ADDRESS_ROLE,         // Role: Hidden field reserved for this peer's network address.
+        peer.address.toString()             // Value: IPv4 address learned from the discovery datagram.
+    );
+
+    item->setData(
+        NEARBY_DEVICE_PORT_ROLE,            // Role: Hidden field reserved for this peer's TCP listening port.
+        static_cast<unsigned int>(peer.port) // Value: Port advertised by the remote FileBridge instance.
+    );
+}
+
+
+/**
+ * handlePeerLost()
+ * Removes a FileBridge instance that is no longer advertising itself.
+ */
+void MainWindow::handlePeerLost(const DiscoveredPeer& peer) {
+    // Search every visible device entry for the unique instance ID of the expired peer.
+    for(int index = 0; index < nearbyDevicesList_->count(); ++index) {
+        QListWidgetItem *item = nearbyDevicesList_->item(index);
+        // data(Qt::UserRole) retrieves the hidden instance ID stored when the item was created.
+        if(item->data(NEARBY_DEVICE_INSTANCE_ID_ROLE).toString() != peer.instanceId) {
+            continue;
+        }
+        // takeItem() removes the matching entry from the list but does not delete it.
+        // Delete the returned item so the removed QListWidgetItem does not leak memory.
+        delete nearbyDevicesList_->takeItem(index);
+        return;
+    }
+}
+
+/**
+ * handleNearbyDeviceDoubleClicked()
+ * Starts a connection request to the discovered device selected by the user.
+ */
+void MainWindow::handleNearbyDeviceDoubleClicked(QListWidgetItem *item) {
+    // Double-clicking and pressing Connect on a selected device use the same connection path.
+    connectToNearbyDevice(item);
+}
+
+
+/**
+ * connectToNearbyDevice()
+ * Starts an outgoing connection using connection data stored in a nearby-device item.
+ */
+void MainWindow::connectToNearbyDevice(QListWidgetItem *item) {
+    // A null item means no discovered peer was supplied.
+    if(item == nullptr) {
+        return;
+    }
+
+    // Recover the peer address stored invisibly when discovery created this list item.
+    const QHostAddress remoteAddress(
+        item->data(NEARBY_DEVICE_ADDRESS_ROLE).toString()
+    );
+
+    bool validPort = false;
+
+    // QVariant::toUInt() converts the hidden port value back to an unsigned integer.
+    // validPort becomes false if the stored value cannot be converted successfully.
+    const unsigned int remotePort =
+        item->data(NEARBY_DEVICE_PORT_ROLE).toUInt(&validPort);
+
+    // Reject corrupted or incomplete discovery data before reaching ConnectionManager.
+    if(remoteAddress.isNull() || !validPort || remotePort == 0 || remotePort > 65535) {
+        statusLabel_->setText("Invalid discovered peer");
+        return;
+    }
+
+    statusLabel_->setText("Connecting...");
+    connectButton_->setEnabled(false);
+
+    connectionManager_.connectToPeer(
+        remoteAddress,
+        static_cast<std::uint16_t>(remotePort)
+    );
 }

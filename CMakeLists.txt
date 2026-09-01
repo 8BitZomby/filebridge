@@ -36,6 +36,7 @@ qt_add_executable(fb
     include/NetworkInfo.hpp
     include/PeerConnection.hpp
     include/PeerConnector.hpp
+    include/PeerDiscovery.hpp
     include/Protocol.hpp
     include/TcpListener.hpp
     include/TransferManager.hpp
@@ -45,6 +46,7 @@ qt_add_executable(fb
     src/NetworkInfo.cpp
     src/PeerConnection.cpp
     src/PeerConnector.cpp
+    src/PeerDiscovery.cpp
     src/Protocol.cpp
     src/TcpListener.cpp
     src/TransferManager.cpp

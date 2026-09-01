@@ -41,6 +41,12 @@ class ConnectionManager : public QObject {
         void connectToPeer(const QHostAddress& address, std::uint16_t port);
 
         /**
+         * disconnectPeer()
+         * Disconnects an established peer currently managed by FileBridge
+         */
+        bool disconnectPeer(PeerConnection *connection);
+
+        /**
          * sendFileOffer()
          * Sends matadata for one proposed file transfer to a ready peer
          */
