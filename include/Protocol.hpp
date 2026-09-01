@@ -11,7 +11,7 @@
 namespace Protocol {
 
     // Current FileBridge protocol version used to detect incompatible peers
-    constexpr std::uint16_t VERSION = 1;
+    constexpr std::uint16_t VERSION = 2;
 
     // Maximum payload size allowed for any single protocol message
     constexpr std::uint64_t MAX_PAYLOAD_SIZE = 64ULL * 1024ULL * 1024ULL;
@@ -29,7 +29,9 @@ namespace Protocol {
         FileReject = 4,
         FileData = 5,
         FileComplete = 6,
-        Error = 7
+        Error = 7,
+        ConnectionAccept = 8,
+        ConnectionReject = 9
     };
 
     /**
@@ -255,6 +257,18 @@ namespace Protocol {
      * Builds a complete FileComplete message for a finished transfer
      */
     Message makeFileCompleteMessage(const FileCompletePayload& complete);
+
+    /**
+     * makeConnectionAcceptMessage()
+     * Builds an empty message confirming that an incoming peer connection was approved
+     */
+    Message makeConnectionAcceptMessage();
+
+    /**
+     * makeConnectionRejectMessage()
+     * Builds an empty message reporting that an incoming peer connection was rejected
+     */
+    Message makeConnectionRejectMessage();
 
     /**
      * serializeMessage()

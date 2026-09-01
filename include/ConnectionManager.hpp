@@ -41,6 +41,18 @@ class ConnectionManager : public QObject {
         void connectToPeer(const QHostAddress& address, std::uint16_t port);
 
         /**
+         * approveConnection()
+         * Approves a pending incoming FileBridge connection.
+         */
+        bool approveConnection(PeerConnection *connection);
+
+        /**
+         * rejectConnection()
+         * Rejects a pending incoming FileBridge connection.
+         */
+        bool rejectConnection(PeerConnection *connection);
+
+        /**
          * disconnectPeer()
          * Disconnects an established peer currently managed by FileBridge
          */
@@ -82,6 +94,21 @@ class ConnectionManager : public QObject {
         std::uint16_t listeningPort() const;
 
     signals:
+
+        /**
+         * connectionApprovalRequested()
+         * Reports an incoming peer whose valid handshake is awaiting local user approval.
+         */
+        void connectionApprovalRequested(
+            PeerConnection *connection,
+            const QString& deviceName
+        );
+
+        /**
+         * connectionRejected()
+         * Reports that the remote user rejected an outgoing connection request.
+         */
+        void connectionRejected(PeerConnection *connection);
 
         /**
          * peerReady()
@@ -134,18 +161,27 @@ class ConnectionManager : public QObject {
     private slots:
 
         /**
-         * handleEstablishedSocket()
-         * Configures an incoming or outgoing TCP socket as a FileBridge peer connection
-         */
-        void handleEstablishedSocket(QTcpSocket *socket);
-
-        /**
          * handlePeerDisconnected()
          * Removes and destroys a peer connection after its socket disconnects
          */
         void handlePeerDisconnected();
 
     private:
+
+        /**
+         * ConnectionDirection
+         * Identifies whether FileBridge accepted or initiated a TCP peer connection.
+         */
+        enum class ConnectionDirection : std::uint8_t {
+            Incoming = 0,
+            Outgoing = 1
+        };
+
+        /**
+         * handleEstablishedSocket()
+         * Configures an incoming or outgoing TCP socket as a FileBridge peer connection
+         */
+        void handleEstablishedSocket(QTcpSocket *socket, ConnectionDirection direction);
 
         /**
          * ManagedPeer
@@ -155,8 +191,17 @@ class ConnectionManager : public QObject {
             // Connection used to exchange framed FileBridge protocol messages
             PeerConnection *connection;
 
+            // Identifies whether this TCP connection was accepted locally or initiated locally
+            ConnectionDirection direction;
+
             // Becomes true after a valid handshake has been received from this peer
             bool handshakeReceived;
+
+            // Becomes true only after the incoming connection request has been approved
+            bool approved;
+
+            // Human-readable device name learned from the remote peer's handshake
+            QString deviceName;
         };
 
         /**

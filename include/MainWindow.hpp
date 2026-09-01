@@ -42,7 +42,19 @@ class MainWindow : public QMainWindow {
         void handleDisconnectClicked();
 
         /**
-         * handlePeerReady()
+         * handleConnectionApprovalRequested()
+         * Displays an approval dialog for an incoming FileBridge connection request
+         */
+        void handleConnectionApprovalRequested(PeerConnection *connection, const QString& deviceName);
+
+        /**
+         * handleConnectionRejected()
+         * Updates the interface when a remote user rejects an outgoing connection request
+         */
+        void handleConnectionRejected(PeerConnection *connection);
+
+        /**
+         * 
          * Updates the interface after a peer completes the FileBridge handshake
          */
         void handlePeerReady(PeerConnection *connection);
@@ -157,6 +169,9 @@ class MainWindow : public QMainWindow {
 
         // Identifies the peer currently available for file-transfer operations
         PeerConnection *activePeer_;
+
+        // Controls whether incoming file offers are accepted automatically for the current connection
+        bool autoAcceptIncomingTransfers_;
 
         // Identifies the incoming transfer currently awaiting a used decision
         std::uint64_t pendingIncomingTransferId_;

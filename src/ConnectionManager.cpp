@@ -19,7 +19,12 @@ ConnectionManager::ConnectionManager(QObject *parent) : QObject(parent) {
         &listener_,                             // Object that emits the signal
         &TcpListener::connectionAccepted,       // Signal emitted after an incoming socket is accepted
         this,                                   // Object that receives the slot call
-        &ConnectionManager::handleEstablishedSocket // Slot that configures the accepted socket
+        [this](QTcpSocket *socket) {            // Slot that configures the accepted socket
+            handleEstablishedSocket(
+                socket,                         // socket: Connected TCP socket accepted by the local listener
+                ConnectionDirection::Incoming   // direction: Remote FileBridge initiated this connection
+            );
+        }
     );
 
     // Configure outgoing sockets after a connection attempt succeeds
@@ -27,7 +32,12 @@ ConnectionManager::ConnectionManager(QObject *parent) : QObject(parent) {
         &connector_,                                // Object that emits the signal
         &PeerConnector::connectionEstablished,      // Signal emitted after and outgoing connection succeeds
         this,                                       // Object that receives the slot call
-        &ConnectionManager::handleEstablishedSocket // Shared slot for established sockets
+        [this](QTcpSocket *socket) {                // Shared slot for established sockets
+            handleEstablishedSocket(
+                socket,                             // socket: Connected TCP socket created by the outgoing connector
+                ConnectionDirection::Outgoing       // direction: This FileBridge instance initiated the connection
+            );
+        }
     );
 
     // Forward outgoing connection failures to higher-level FileBridge code
@@ -55,6 +65,83 @@ bool ConnectionManager::start() {
  */
 void ConnectionManager::connectToPeer(const QHostAddress& address, std::uint16_t port) {
     connector_.connectToPeer(address, port);
+}
+
+
+/**
+ * approveConnection()
+ * Approves a pending incoming FileBridge connection.
+ */
+bool ConnectionManager::approveConnection(PeerConnection *connection) {
+    // std::find_if() returns the matching managed peer, or connections_.end()
+    // when this connection is not currently tracked by ConnectionManager.
+    auto peer = std::find_if(
+        connections_.begin(),
+        connections_.end(),
+        [connection](const ManagedPeer& managedPeer) {
+            return managedPeer.connection == connection;
+        }
+    );
+
+    // Approval is valid only for an incoming peer that completed its handshake
+    // and has not already been approved.
+    if(peer == connections_.end() ||
+        peer->direction != ConnectionDirection::Incoming ||
+        !peer->handshakeReceived ||
+        peer->approved) {
+        
+            return false;
+    }
+
+    const Protocol::Message message = Protocol::makeConnectionAcceptMessage();
+
+    // Do not mark the peer approved unless the acceptance message was successfully queued.
+    if(!connection->sendMessage(message)) {
+        return false;
+    }
+
+    peer->approved = true;
+
+    // Both handshake and local user approval are now complete.
+    emit peerReady(connection);
+
+    return true;
+}
+
+
+/**
+ * rejectConnection()
+ * Rejects a pending incoming FileBridge connection.
+ */
+bool ConnectionManager::rejectConnection(PeerConnection *connection) {
+    // Search for the pending incoming peer represented by this connection pointer.
+    const auto peer = std::find_if(
+        connections_.begin(),
+        connections_.end(),
+        [connection](const ManagedPeer& managedPeer) {
+
+            return managedPeer.connection == connection;
+        }
+    );
+
+    if(peer == connections_.end() ||
+        peer->direction != ConnectionDirection::Incoming ||
+        !peer->handshakeReceived ||
+        peer->approved) {
+        
+            return false;
+    }
+
+    const Protocol::Message message = Protocol::makeConnectionRejectMessage();
+
+    // Queue the explicit rejection before closing the TCP connection.
+    if(!connection->sendMessage(message)) {
+        return false;
+    }
+
+    connection->disconnectFromPeer();
+
+    return true;
 }
 
 
@@ -106,7 +193,7 @@ bool ConnectionManager::sendFileOffer(PeerConnection *connection, const Protocol
     );
 
     // File-transfer messages may only be sent to peers that complete the handshake
-    if(peer == connections_.end() || !peer->handshakeReceived) {
+    if(peer == connections_.end() || !peer->handshakeReceived || !peer->approved) {
         return false;
     }
 
@@ -133,7 +220,7 @@ bool ConnectionManager::sendFileAccept(PeerConnection *connection, const Protoco
     );
 
     // Transfer responses may only be sent to validated FileBridge peers
-    if(peer == connections_.end() || !peer->handshakeReceived) {
+    if(peer == connections_.end() || !peer->handshakeReceived || !peer->approved) {
         return false;
     }
 
@@ -159,7 +246,7 @@ bool ConnectionManager::sendFileReject(PeerConnection *connection, const Protoco
     );
 
     // Transfer responses may only be sent to validated FileBridge peers
-    if(peer == connections_.end() || !peer->handshakeReceived) {
+    if(peer == connections_.end() || !peer->handshakeReceived || !peer->approved) {
         return false;
     }
 
@@ -186,7 +273,7 @@ bool ConnectionManager::sendFileData(PeerConnection *connection, const Protocol:
     );
 
     // File data may only be sent to peers that completed the handshake
-    if(peer == connections_.end() || !peer->handshakeReceived) {
+    if(peer == connections_.end() || !peer->handshakeReceived || !peer->approved) {
         return false;
     }
 
@@ -213,7 +300,7 @@ bool ConnectionManager::sendFileComplete(PeerConnection *connection, const Proto
     );
 
     // File-transfer messages may only be sent to validated FileBridge peers
-    if(peer == connections_.end() || !peer->handshakeReceived) {
+    if(peer == connections_.end() || !peer->handshakeReceived || !peer->approved) {
         return false;
     }
 
@@ -235,9 +322,9 @@ std::uint16_t ConnectionManager::listeningPort() const {
 
 /**
  * handleEstablishedSocket()
- * Wraps and established TCP socket in PeerConnection and begins the handshake
+ * Configures an established TCP socket and records whether it is incoming or outgoing
  */
-void ConnectionManager::handleEstablishedSocket(QTcpSocket *socket) {
+void ConnectionManager::handleEstablishedSocket(QTcpSocket *socket, ConnectionDirection direction) {
     // Ignore invalid socket pointers rather than creating an unusable peer connection
     if(socket == nullptr) {
         return;
@@ -247,7 +334,15 @@ void ConnectionManager::handleEstablishedSocket(QTcpSocket *socket) {
     PeerConnection *connection = new PeerConnection(socket, this);
 
     // Track the peer immediately, but do not consider it ready until its handshake is validated
-    connections_.push_back({connection, false});
+    connections_.push_back(
+        ManagedPeer {
+            connection, // connection: PeerConnection that owns this established TCP socket
+            direction,  // direction: Records which side initiated the TCP connection
+            false,      // handshakeReceived: No remote handshake has been validated yet
+            false,      // approved: Connection is not usable until approval completes
+            QString()   // deviceName: Filled when the remote handshake is decoded
+        }
+    );
 
     // Process complete protocol messages received from this specific peer
     QObject::connect(
@@ -361,6 +456,20 @@ void ConnectionManager::handleMessage(PeerConnection *connection, const Protocol
         return;
     }
 
+    // File-transfer messages are forbidden until connection approval completes
+    const bool isTransferMessage =
+        message.header.type == Protocol::MessageType::FileOffer ||
+        message.header.type == Protocol::MessageType::FileAccept ||
+        message.header.type == Protocol::MessageType::FileReject ||
+        message.header.type == Protocol::MessageType::FileData ||
+        message.header.type == Protocol::MessageType::FileComplete;
+
+    if(isTransferMessage && !peer->approved) {
+        qDebug() << "Received transfer message before connection approval";
+        connection->disconnectFromPeer();
+        return;
+    }
+
     switch(message.header.type) {
         case Protocol::MessageType::Handshake: {
             // A peer should perform the FileBridge handshake only once per connection
@@ -388,13 +497,60 @@ void ConnectionManager::handleMessage(PeerConnection *connection, const Protocol
 
             // The connection is now a validated FileBridge peer and may exchange transfer messages
             peer->handshakeReceived = true;
+            peer->deviceName = handshake.deviceName;
 
-            qDebug() << "Handshake received";
-            qDebug() << "Protocol version:" << handshake.protocolVersion;
-            qDebug() << "Application version:" << handshake.applicationVersion;
-            qDebug() << "Device name:" << handshake.deviceName;
+            if(peer->direction == ConnectionDirection::Incoming) {
+                // Incoming peers require an explicit decision from the local user
+                emit connectionApprovalRequested(
+                        connection,
+                        peer->deviceName
+                );
+            }
 
+            // Outgoing peers remain pending until the remote user sends
+            // ConnectionAccept or ConnectionReject
+            break;
+        }
+
+        case Protocol::MessageType::ConnectionAccept: {
+            // Approval messages deliberately contain no payload.
+            if(!message.payload.isEmpty()) {
+                qDebug() << "ConnectionAccept unexpectedly contained payload data";
+                connection->disconnectFromPeer();
+                return;
+            }
+
+            // Only the initiator of an outgoing connection may receive approval.
+            if(peer->direction != ConnectionDirection::Outgoing || peer->approved) {
+                qDebug() << "Unexpected ConnectionAccept message";
+                connection->disconnectFromPeer();
+                return;
+            }
+            peer->approved = true;
             emit peerReady(connection);
+            break;
+        }
+
+        case Protocol::MessageType::ConnectionReject: {
+            // Rejection messages deliberately contain no payload.
+            if(!message.payload.isEmpty()) {
+                qDebug() << "ConnectionReject unexpectedly contained payload data";
+                connection->disconnectFromPeer();
+                return;
+            }
+
+            // Only an outgoing connection request can be rejected by the remote user.
+            if(peer->direction != ConnectionDirection::Outgoing || peer->approved) {
+                qDebug() << "Unexpected ConnectionReject message";
+                connection->disconnectFromPeer();
+                return;
+            }
+
+            emit connectionRejected(connection);
+
+            // Rejected requests are no longer useful, so close the TCP connection.
+            connection->disconnectFromPeer();
+
             break;
         }
 
@@ -445,6 +601,7 @@ void ConnectionManager::handleMessage(PeerConnection *connection, const Protocol
             emit fileDataReceived(connection, fileData);
             break;
         }
+
         case Protocol::MessageType::FileComplete: {
             Protocol::FileCompletePayload complete;
             // Reject malformed completion messages before exposing them to transfer logic
@@ -456,11 +613,14 @@ void ConnectionManager::handleMessage(PeerConnection *connection, const Protocol
             emit fileCompleteReceived(connection, complete);
             break;
         }
-        case Protocol::MessageType::Error:
+
+        case Protocol::MessageType::Error: {
             // Transfer-level handling will be added as each protocol message is implemented
             qDebug() << "Received unhandled message type:"
                      << static_cast<std::uint8_t>(message.header.type);
             break;
+        }
+
         case Protocol::MessageType::Invalid:
             // Invalid message types should already be rejected by the framing parser
             qDebug() << "Received invalid protocol message";

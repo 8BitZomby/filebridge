@@ -4,12 +4,18 @@
 #include "PeerDiscovery.hpp"
 #include "Protocol.hpp"
 
+#include <QApplication>
+#include <QCheckBox>
+#include <QDialog>
 #include <QFileDialog>
+#include <QHBoxLayout>
 #include <QHostAddress>
-#include <QStandardPaths>
 #include <QIntValidator>
+#include <QLabel>
+#include <QStandardPaths>
 #include <QVBoxLayout>
 #include <QWidget>
+
 #include <cstdint>
 
 
@@ -22,6 +28,7 @@ MainWindow::MainWindow(QWidget *parent) :
     peerDiscovery_(nullptr),
     transferManager_(&connectionManager_, this),
     activePeer_(nullptr),
+    autoAcceptIncomingTransfers_(false),
     pendingIncomingTransferId_(0),
     localAddressLabel_(new QLabel(this)),
     localPortLabel_(new QLabel(this)),
@@ -147,6 +154,22 @@ MainWindow::MainWindow(QWidget *parent) :
             &QPushButton::clicked,                          // Signal: Emitted when the user clicks the button
             this,                                           // Receiver: This MainWindow instance
             &MainWindow::handleRejectTransferClicked        // Slot: Rejects the pending incoming transfer
+        );
+
+        // Ask the local user whether an incoming FileBridge connection should be trusted.
+        QObject::connect(
+            &connectionManager_,                                  // Sender: Manager validating incoming FileBridge peers.
+            &ConnectionManager::connectionApprovalRequested,      // Signal: Emitted after an incoming peer completes its handshake
+            this,                                                 // Receiver: This MainWindow instance.
+            &MainWindow::handleConnectionApprovalRequested        // Slot: Displays the Accept/Reject connection dialog.
+        );
+
+        // Report when another user rejects a connection initiated by this FileBridge instance.
+        QObject::connect(
+            &connectionManager_,                                  // Sender: Manager tracking the outgoing connection request.
+            &ConnectionManager::connectionRejected,               // Signal: Emitted after the remote user rejects the request.
+            this,                                                 // Receiver: This MainWindow instance.
+            &MainWindow::handleConnectionRejected                 // Slot: Restores the disconnected interface state.
         );
 
         // Update the interface only after a peer completes a valid FileBridge handshake
@@ -305,6 +328,133 @@ void MainWindow::handleDisconnectClicked() {
 }
 
 
+/**
+ * handleConnectionApprovalRequested()
+ * Displays an approval dialog for an incoming FileBridge connection request
+ */
+void MainWindow::handleConnectionApprovalRequested(
+    PeerConnection *connection,
+    const QString& deviceName
+) {
+    // A connection request without a valid managed peer cannot be approved.
+    if(connection == nullptr) {
+        return;
+    }
+
+    // Bring the receiving FileBridge window forward before displaying its child dialog.
+    show();
+    raise();
+    activateWindow();
+
+    // Request attention if macOS does not immediately grant this application focus.
+    QApplication::alert(this);
+
+    // Parent the dialog directly to this receiving MainWindow.
+    // Unlike the native QMessageBox implementation on macOS, QDialog allows
+    // FileBridge to control the dialog's placement relative to its parent.
+    QDialog approvalDialog(this);
+
+    approvalDialog.setWindowTitle("Connection request");
+    approvalDialog.setModal(true);
+
+    QLabel *messageLabel = new QLabel(
+        deviceName + " wants to connect to FileBridge.",
+        &approvalDialog
+    );
+
+    messageLabel->setWordWrap(true);
+
+    // This preference lasts only until the current peer disconnects.
+    QCheckBox *autoAcceptCheckBox = new QCheckBox(
+        "Automatically accept incoming files for this connection",
+        &approvalDialog
+    );
+
+    autoAcceptCheckBox->setChecked(true);
+
+    QPushButton *rejectButton = new QPushButton(
+        "Reject",
+        &approvalDialog
+    );
+
+    QPushButton *acceptButton = new QPushButton(
+        "Accept",
+        &approvalDialog
+    );
+
+    // Accept is the primary action when the user presses Return.
+    acceptButton->setDefault(true);
+
+    // Rejecting the dialog produces QDialog::Rejected.
+    QObject::connect(
+        rejectButton,                 // Sender: Reject button in the connection approval dialog.
+        &QPushButton::clicked,        // Signal: Emitted when the user clicks Reject.
+        &approvalDialog,              // Receiver: The approval dialog itself.
+        &QDialog::reject              // Slot: Closes the dialog with the Rejected result.
+    );
+
+    // Accepting the dialog produces QDialog::Accepted.
+    QObject::connect(
+        acceptButton,                 // Sender: Accept button in the connection approval dialog.
+        &QPushButton::clicked,        // Signal: Emitted when the user clicks Accept.
+        &approvalDialog,              // Receiver: The approval dialog itself.
+        &QDialog::accept              // Slot: Closes the dialog with the Accepted result.
+    );
+
+    // Keep the two decision buttons together on one horizontal row.
+    QHBoxLayout *buttonLayout = new QHBoxLayout();
+
+    buttonLayout->addWidget(rejectButton);
+    buttonLayout->addWidget(acceptButton);
+
+    // Build the complete connection-request dialog vertically.
+    QVBoxLayout *dialogLayout = new QVBoxLayout(&approvalDialog);
+
+    dialogLayout->addWidget(messageLabel);
+    dialogLayout->addWidget(autoAcceptCheckBox);
+    dialogLayout->addLayout(buttonLayout);
+
+    approvalDialog.adjustSize();
+
+    // mapToGlobal() converts the center of this receiving MainWindow from
+    // window-relative coordinates into screen coordinates.
+    const QPoint parentCenter = mapToGlobal(rect().center());
+
+    // Position the dialog so its own center exactly matches the center of
+    // the receiving FileBridge window.
+    approvalDialog.move(
+        parentCenter.x() - approvalDialog.width() / 2,
+        parentCenter.y() - approvalDialog.height() / 2
+    );
+
+    approvalDialog.raise();
+    approvalDialog.activateWindow();
+
+    const int result = approvalDialog.exec();
+
+    if(result == QDialog::Accepted) {
+        // Remember whether this peer's file offers should be accepted automatically
+        // for the lifetime of this connection.
+        autoAcceptIncomingTransfers_ = autoAcceptCheckBox->isChecked();
+
+        if(!connectionManager_.approveConnection(connection)) {
+            autoAcceptIncomingTransfers_ = false;
+            statusLabel_->setText("Failed to approve connection");
+        }
+
+        return;
+    }
+
+    // Rejecting the connection clears any connection-specific transfer permission.
+    autoAcceptIncomingTransfers_ = false;
+
+    if(!connectionManager_.rejectConnection(connection)) {
+        statusLabel_->setText("Failed to reject connection");
+        return;
+    }
+
+    statusLabel_->setText("Connection rejected");
+}
 
 
 /**
@@ -325,25 +475,42 @@ void MainWindow::handlePeerReady(PeerConnection *connection) {
 
 
 /**
+ * handleConnectionRejected()
+ * Updates the interface when a remote user rejects an outgoing connection request
+ */
+void MainWindow::handleConnectionRejected(PeerConnection *connection) {
+    Q_UNUSED(connection);
+
+    // The rejected connection never became an active transfer peer.
+    autoAcceptIncomingTransfers_ = false;
+
+    statusLabel_->setText("Connection rejected");
+    connectButton_->setEnabled(true);
+    disconnectButton_->setEnabled(false);
+    chooseFileButton_->setEnabled(false);
+}
+
+
+/**
  * handlePeerDisconnected()
- * Updates the interface after the active FileBridge peer disconnects.
+ * Updates the interface after an established or pending peer disconnects
  */
 void MainWindow::handlePeerDisconnected(PeerConnection *connection) {
-    // ConnectionManager can report any managed peer. Only reset this window's
-    // active connection state when the disconnected peer is the one currently in use.
     if(connection != activePeer_) {
         return;
     }
 
     // The PeerConnection will be destroyed by ConnectionManager after this signal returns.
     activePeer_ = nullptr;
-  
+
+    // Automatic file acceptance is trusted only for the lifetime of this connection.
+    autoAcceptIncomingTransfers_ = false;
+
     statusLabel_->setText("Disconnected");
     connectButton_->setEnabled(true);
     disconnectButton_->setEnabled(false);
     chooseFileButton_->setEnabled(false);
 
-    // A disconnected peer cannot have an actionable transfer decision in this window.
     acceptTransferButton_->setEnabled(false);
     rejectTransferButton_->setEnabled(false);
 }
@@ -447,20 +614,41 @@ void MainWindow::handleIncomingTransferCompleted(std::uint64_t transferId) {
 
 /**
  * handleIncomingTransferOffered()
- * Displays a pending incoming transfer reported by the transfer manager.
+ * Automatically accepts or displays a newly received file offer according to the current connection policy
  */
 void MainWindow::handleIncomingTransferOffered(const TransferManager::IncomingTransfer& transfer) {
-    // Remember which transfer the Accept and Reject buttons should operate on
+    // Automatically accept the offer when the user trusted incoming files for this connection.
+    if(autoAcceptIncomingTransfers_) {
+        if(!transferManager_.acceptIncomingTransfer(transfer.transferId)) {
+            statusLabel_->setText("Failed to automatically accept incoming transfer");
+            return;
+        }
+
+        // No manual decision is pending because this offer was accepted immediately.
+        pendingIncomingTransferId_ = 0;
+        pendingIncomingFileName_.clear();
+
+        acceptTransferButton_->setEnabled(false);
+        rejectTransferButton_->setEnabled(false);
+
+        statusLabel_->setText(
+            "Receiving: " +
+            transfer.fileName +
+            " (" +
+            QString::number(transfer.fileSize) +
+            " bytes)"
+        );
+
+        return;
+    }
+
+    // Manual mode remembers the transfer so the existing Accept and Reject buttons can act on it.
     pendingIncomingTransferId_ = transfer.transferId;
-    
-    // Remember the offered filename so the save dialog can suggest it later
     pendingIncomingFileName_ = transfer.fileName;
 
-    // Allow the user to respond to the newly received file offer
     acceptTransferButton_->setEnabled(true);
     rejectTransferButton_->setEnabled(true);
 
-    // Temporarily display the incoming transfer metadata in the status label.
     statusLabel_->setText(
         "Incoming offer: " +
         transfer.fileName +

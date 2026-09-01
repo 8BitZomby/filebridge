@@ -90,6 +90,8 @@ bool Protocol::isValidMessageType(std::uint8_t type) {
         case MessageType::FileData:
         case MessageType::FileComplete:
         case MessageType::Error:
+        case MessageType::ConnectionAccept:
+        case MessageType::ConnectionReject:
             return true;
         case MessageType::Invalid:
             return false;
@@ -533,6 +535,40 @@ Protocol::Message Protocol::makeFileRejectMessage(const FileRejectPayload& rejec
             static_cast<std::uint64_t>(payload.size())
         },
         payload
+    };
+}
+
+
+/**
+ * makeConnectionAcceptMessage()
+ * Builds an empty message confirming that an incoming peer connection was approved.
+ */
+Protocol::Message Protocol::makeConnectionAcceptMessage() {
+    // Connection approval applies to the TCP peer carrying this message,
+    // so no additional payload is required to identify the connection.
+    return {
+        {
+            MessageType::ConnectionAccept, // type: Identifies this frame as connection approval.
+            0                              // payloadSize: ConnectionAccept carries no payload bytes.
+        },
+        QByteArray()                       // payload: Empty because the TCP connection supplies peer identity.
+    };
+}
+
+
+/**
+ * makeConnectionRejectMessage()
+ * Builds an empty message reporting that an incoming peer connection was rejected.
+ */
+Protocol::Message Protocol::makeConnectionRejectMessage() {
+    // Connection rejection applies to the TCP peer carrying this message,
+    // so no additional payload is required to identify the connection.
+    return {
+        {
+            MessageType::ConnectionReject, // type: Identifies this frame as connection rejection.
+            0                              // payloadSize: ConnectionReject carries no payload bytes.
+        },
+        QByteArray()                       // payload: Empty because the TCP connection supplies peer identity.
     };
 }
 
