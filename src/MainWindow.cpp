@@ -8,6 +8,9 @@
 #include <QCheckBox>
 #include <QDialog>
 #include <QFileDialog>
+#include <QFileInfo>
+#include <QFrame>
+#include <QGridLayout>
 #include <QHBoxLayout>
 #include <QHostAddress>
 #include <QIntValidator>
@@ -29,17 +32,24 @@ MainWindow::MainWindow(QWidget *parent) :
     transferManager_(&connectionManager_, this),
     activePeer_(nullptr),
     autoAcceptIncomingTransfers_(false),
-    pendingIncomingTransferId_(0),
-    localAddressLabel_(new QLabel(this)),
-    localPortLabel_(new QLabel(this)),
-    remoteAddressEdit_(new QLineEdit(this)),
-    remotePortEdit_(new QLineEdit(this)),
+    outgoingQueueSending_(false),
+    connectionInfoButton_(new QToolButton(this)),
     nearbyDevicesList_(new QListWidget(this)),
     connectButton_(new QPushButton("Connect", this)),
     disconnectButton_(new QPushButton("Disconnect", this)),
-    chooseFileButton_(new QPushButton("Choose File", this)),
-    acceptTransferButton_(new QPushButton("Accept", this)),
-    rejectTransferButton_(new QPushButton("Reject", this)),
+    manualConnectionButton_(new QPushButton("Manual", this)),
+    transferModeButtonGroup_(new QButtonGroup(this)),
+    sendModeButton_(new QPushButton("Send", this)),
+    receiveModeButton_(new QPushButton("Receive", this)),
+    transferStack_(new QStackedWidget(this)),
+    outgoingFilesList_(new QListWidget(this)),
+    addFilesButton_(new QPushButton("Add files...", this)),
+    removeSelectedFilesButton_(new QPushButton("Remove Selected", this)),
+    sendFilesButton_(new QPushButton("Send", this)),
+    incomingFilesList_(new QListWidget(this)),
+    acceptTransferButton_(new QPushButton("Accept Selected", this)),
+    rejectTransferButton_(new QPushButton("Reject Selected", this)),
+    removeSelectedIncomingButton_(new QPushButton("Remove Selected", this)),
     statusLabel_(new QLabel("Ready", this)) {
 
         // Start listening for incoming FileBridge connections before displaying connections
@@ -76,37 +86,52 @@ MainWindow::MainWindow(QWidget *parent) :
             }
         }
 
-        // Display the preferred local IPv4 address that another device can use to connect
-        const QHostAddress localAddress = NetworkInfo::preferredLocalIPv4Address();
-
-        if(localAddress.isNull()) {
-            localAddressLabel_->setText("Unavailable");
-        }
-        else {
-            localAddressLabel_->setText(localAddress.toString());
-        }
-
-        // Display the automatically selected listening port
-        localPortLabel_->setText(QString::number(connectionManager_.listeningPort()));
-
-        // Restrict the port field to the valid TCP/UDP port-number range
-        remotePortEdit_->setValidator(new QIntValidator(1, 65535, remotePortEdit_));
-
-        remoteAddressEdit_->setPlaceholderText("192.168.0.10");
-        remotePortEdit_->setPlaceholderText("Port");
+        // Make the connection-information control a small, unobtrusive square
+        connectionInfoButton_->setText("i");
+        connectionInfoButton_->setAutoRaise(true);
+        connectionInfoButton_->setFixedSize(20, 20);
+        connectionInfoButton_->setToolTip("Show connection information");
 
         // Make nearby devices list small but scrollable if more devices show up
         nearbyDevicesList_->setMaximumHeight(50);
 
-        // File offers are only valid after a peer completes the FileBridge handshake
-        chooseFileButton_->setEnabled(false);
+        // The two transfer-mode buttons behave as one exclusive Send/Receive selector
+        sendModeButton_->setCheckable(true);
+        receiveModeButton_->setCheckable(true);
+        transferModeButtonGroup_->setExclusive(true);
+
+        transferModeButtonGroup_->addButton(sendModeButton_);
+        transferModeButtonGroup_->addButton(receiveModeButton_);
+
+        // FileBridge starts on the outgoing-file page
+        sendModeButton_->setChecked(true);
+
+        // Allow several queued files to be selected and removed together
+        outgoingFilesList_->setSelectionMode(QAbstractItemView::ExtendedSelection);
+        outgoingFilesList_->setFixedHeight(100);
+
+        // The incoming list will eventually support selecting seval offers at once
+        incomingFilesList_->setSelectionMode(QAbstractItemView::ExtendedSelection);
+        incomingFilesList_->setFixedHeight(100);
+
+        // Queue controls are updated from the current connection, queue contents, and sending state
+        updateOutgoingQueueControls();
 
         // Disconnect is only available after a peer completes the FileBridge handshake
         disconnectButton_->setEnabled(false);
 
-        // Accept and Reject are only available while an incoming transfer is awaiting a decision
+        // Incoming transfer decisions are only shown when manual approval is actually required
         acceptTransferButton_->setEnabled(false);
         rejectTransferButton_->setEnabled(false);
+        removeSelectedIncomingButton_->setEnabled(false);
+
+        // Display local connection information when the user requests it.
+        QObject::connect(
+            connectionInfoButton_,                          // Sender: Button that exposes manual connection information.
+            &QToolButton::clicked,                          // Signal: Emitted when the user clicks Connection Info.
+            this,                                           // Receiver: This MainWindow instance.
+            &MainWindow::handleConnectionInfoClicked        // Slot: Opens the local address and port dialog.
+        );
 
         // Start an outgoing connection when the user presses the Connect button
         QObject::connect(
@@ -124,6 +149,14 @@ MainWindow::MainWindow(QWidget *parent) :
             &MainWindow::handleDisconnectClicked            // Slot: Requests disconnection of the active peer.
         );
 
+        // Open the fallback dialog for connecting directly by IP address and port.
+        QObject::connect(
+            manualConnectionButton_,                        // Sender: Manual connection button.
+            &QPushButton::clicked,                          // Signal: Emitted when the user clicks Manual.
+            this,                                           // Receiver: This MainWindow instance.
+            &MainWindow::handleManualConnectionClicked      // Slot: Opens the manual connection dialog.
+        );
+
         // Start a connection request when the user double-clicks a discovered device.
         QObject::connect(
             nearbyDevicesList_,                             // Sender: List displaying discovered FileBridge devices.
@@ -132,12 +165,44 @@ MainWindow::MainWindow(QWidget *parent) :
             &MainWindow::handleNearbyDeviceDoubleClicked    // Slot: Connects using the selected peer's stored address and port.
         );
 
-        // Open the file picker when the user chooses to prepare for a transfer
+                // Add one or more local files to the outgoing queue.
         QObject::connect(
-            chooseFileButton_,                              // Button that emits the signal
-            &QPushButton::clicked,                          // Signal emitted when the button is pressed
-            this,                                           // Window that handles the action
-            &MainWindow::handleChooseFileClicked            // Slot that opens the file picker
+            addFilesButton_,                                // Sender: Add Files button below the outgoing queue.
+            &QPushButton::clicked,                          // Signal: Emitted when the user clicks Add Files.
+            this,                                           // Receiver: This MainWindow instance.
+            &MainWindow::handleAddFilesClicked              // Slot: Opens the multi-file picker and queues selections.
+        );
+
+        // Remove files selected in the outgoing queue.
+        QObject::connect(
+            removeSelectedFilesButton_,                     // Sender: Remove Selected button below the outgoing queue.
+            &QPushButton::clicked,                          // Signal: Emitted when the user clicks Remove Selected.
+            this,                                           // Receiver: This MainWindow instance.
+            &MainWindow::handleRemoveSelectedFilesClicked   // Slot: Removes each selected queue entry.
+        );
+
+        // Start processing the queued files when the user clicks Send.
+        QObject::connect(
+            sendFilesButton_,                               // Sender: Send button below the outgoing queue.
+            &QPushButton::clicked,                          // Signal: Emitted when the user clicks Send.
+            this,                                           // Receiver: This MainWindow instance.
+            &MainWindow::handleSendFilesClicked             // Slot: Starts sequential processing of the outgoing queue.
+        );
+
+        // Display the outgoing transfer controls when the user selects Send mode.
+        QObject::connect(
+            sendModeButton_,                                // Sender: Send side of the transfer-mode selector.
+            &QPushButton::clicked,                          // Signal: Emitted when the Send mode is selected.
+            this,                                           // Receiver: This MainWindow instance.
+            &MainWindow::handleSendModeClicked              // Slot: Displays the outgoing transfer page.
+        );
+
+        // Display incoming offers when the user selects Receive mode.
+        QObject::connect(
+            receiveModeButton_,                             // Sender: Receive side of the transfer-mode selector.
+            &QPushButton::clicked,                          // Signal: Emitted when the Receive mode is selected.
+            this,                                           // Receiver: This MainWindow instance.
+            &MainWindow::handleReceiveModeClicked           // Slot: Displays the incoming transfer page.
         );
 
         // Accept the currently displayed incoming transfer when the user clicks Accept
@@ -145,7 +210,7 @@ MainWindow::MainWindow(QWidget *parent) :
             acceptTransferButton_,                          // Sender: Accept button in the FileBridge window
             &QPushButton::clicked,                          // Signal: Emitted when the user clicks the button
             this,                                           // Receiver: This MainWindow instance
-            &MainWindow::handleAcceptTransferClicked        // Slot: Accepts the pending incoming transfer
+            &MainWindow::handleAcceptSelectedIncomingClicked // Slot: Accepts each selected incoming transfer
         );
 
         // Reject the currently displayed incoming transfer when the user clicks Reject
@@ -153,13 +218,37 @@ MainWindow::MainWindow(QWidget *parent) :
             rejectTransferButton_,                          // Sender: Reject button in the FileBridge window
             &QPushButton::clicked,                          // Signal: Emitted when the user clicks the button
             this,                                           // Receiver: This MainWindow instance
-            &MainWindow::handleRejectTransferClicked        // Slot: Rejects the pending incoming transfer
+            &MainWindow::handleRejectSelectedIncomingClicked // Slot: Rejects each selected incoming transfer
+        );
+
+        // Remove completed or rejected incoming-transfer rows selected by the user.
+        QObject::connect(
+            removeSelectedIncomingButton_,                  // Sender: Remove Selected button on the Receive page.
+            &QPushButton::clicked,                          // Signal: Emitted when the user clicks Remove Selected.
+            this,                                           // Receiver: This MainWindow instance.
+            &MainWindow::handleRemoveSelectedIncomingClicked // Slot: Removes eligible selected rows.
+        );
+
+        // Recalculate whether Remove Selected is available when the incoming selection changes.
+        QObject::connect(
+            incomingFilesList_,                             // Sender: Incoming-transfer list.
+            &QListWidget::itemSelectionChanged,             // Signal: Emitted whenever the selected rows change.
+            this,                                           // Receiver: This MainWindow instance.
+            &MainWindow::updateIncomingRemoveControl        // Slot: Updates Remove Selected availability.
+        );
+
+        // Recalculate whether Accept Selected and Reject Selected are available when selection changes.
+        QObject::connect(
+            incomingFilesList_,                                 // Sender: Incoming-transfer list.
+            &QListWidget::itemSelectionChanged,                 // Signal: Emitted whenever the selected rows change.
+            this,                                               // Receiver: This MainWindow instance.
+            &MainWindow::updateIncomingDecisionControls         // Slot: Updates incoming decision-button availability.
         );
 
         // Ask the local user whether an incoming FileBridge connection should be trusted.
         QObject::connect(
             &connectionManager_,                                  // Sender: Manager validating incoming FileBridge peers.
-            &ConnectionManager::connectionApprovalRequested,      // Signal: Emitted after an incoming peer completes its handshake
+            &ConnectionManager::connectionApprovalRequested,    // Signal: Emitted after an incoming peer completes its handshake
             this,                                                 // Receiver: This MainWindow instance.
             &MainWindow::handleConnectionApprovalRequested        // Slot: Displays the Accept/Reject connection dialog.
         );
@@ -241,28 +330,78 @@ MainWindow::MainWindow(QWidget *parent) :
         QWidget *centralWidget = new QWidget(this);
         QVBoxLayout *layout = new QVBoxLayout(centralWidget);
 
-        layout->addWidget(new QLabel("Your address:", centralWidget));
-        layout->addWidget(localAddressLabel_);
-
-        layout->addWidget(new QLabel("Port:", centralWidget));
-        layout->addWidget(localPortLabel_);
-
-        layout->addWidget(new QLabel("Nearby devices:", centralWidget));
+        // Keep the section title and connection-info control on the same row
+        QHBoxLayout *nearbyHeaderLayout = new QHBoxLayout();
+        nearbyHeaderLayout->addWidget(new QLabel("Nearby devices:", centralWidget));
+        nearbyHeaderLayout->addStretch();
+        nearbyHeaderLayout->addWidget(connectionInfoButton_);
+        layout->addLayout(nearbyHeaderLayout);
         layout->addWidget(nearbyDevicesList_);
 
-        layout->addWidget(new QLabel("Connect to peer:", centralWidget));
-        layout->addWidget(remoteAddressEdit_);
-        layout->addWidget(remotePortEdit_);
-        layout->addWidget(connectButton_);
-        layout->addWidget(disconnectButton_);
+        // Group all peer-connection actions together on one row
+        QHBoxLayout *connectionButtonLayout = new QHBoxLayout();
+        connectionButtonLayout->addWidget(connectButton_);
+        connectionButtonLayout->addWidget(disconnectButton_);
+        connectionButtonLayout->addWidget(manualConnectionButton_);
+        
+        layout->addLayout(connectionButtonLayout);
 
-        layout->addWidget(new QLabel("File transfer:", centralWidget));
-        layout->addWidget(chooseFileButton_);
-        layout->addWidget(acceptTransferButton_);
-        layout->addWidget(rejectTransferButton_);
+        // Keep Send and Receive together as a compact mode selector
+        QHBoxLayout *transferModeLayout = new QHBoxLayout();
+        transferModeLayout->addStretch();
+        transferModeLayout->addWidget(sendModeButton_);
+        transferModeLayout->addWidget(receiveModeButton_);
+        transferModeLayout->addStretch();
 
-        layout->addWidget(new QLabel("Status:", centralWidget));
-        layout->addWidget(statusLabel_);
+        // Built the outgoing-file page shown while Send mode is selected
+        layout->addLayout(transferModeLayout);
+
+        // Build the outgoing-file page shown while Send mode is selected
+        QWidget *sendPage = new QWidget(transferStack_);
+        QVBoxLayout *sendPageLayout = new QVBoxLayout(sendPage);
+
+        sendPageLayout->setContentsMargins(0, 0, 0, 0);
+        sendPageLayout->addWidget(new QLabel("Files to send:", sendPage));
+        sendPageLayout->addWidget(outgoingFilesList_);
+
+        QHBoxLayout *transferButtonLayout = new QHBoxLayout();
+        transferButtonLayout->addWidget(addFilesButton_);
+        transferButtonLayout->addWidget(removeSelectedFilesButton_);
+        transferButtonLayout->addWidget(sendFilesButton_);
+
+        sendPageLayout->addLayout(transferButtonLayout);
+
+        // Build the incoming-file page shown while Receive mode is selected
+        QWidget *receivePage = new QWidget(transferStack_);
+        QVBoxLayout *receivePageLayout = new QVBoxLayout(receivePage);
+
+        receivePageLayout->setContentsMargins(0, 0, 0, 0);
+        receivePageLayout->addWidget(new QLabel("Files to receive:", receivePage));
+        receivePageLayout->addWidget(incomingFilesList_);
+
+        // These existing buttons temporarily preserve the current one-offer approval path
+        QHBoxLayout *incomingDecisionLayout = new QHBoxLayout();
+        incomingDecisionLayout->addWidget(acceptTransferButton_);
+        incomingDecisionLayout->addWidget(rejectTransferButton_);
+        incomingDecisionLayout->addWidget(removeSelectedIncomingButton_);
+
+        receivePageLayout->addLayout(incomingDecisionLayout);
+
+        // QStackedWidget keeps both transfer pages in the same fixed region and displays
+        // at one time
+        transferStack_->addWidget(sendPage);
+        transferStack_->addWidget(receivePage);
+        transferStack_->setCurrentWidget(sendPage);
+
+        layout->addWidget(transferStack_);
+
+        // Keep the status heading and current status value on one line
+        QHBoxLayout *statusLayout = new QHBoxLayout();
+
+        statusLayout->addWidget(new QLabel("Status:", centralWidget));
+        statusLayout->addWidget(statusLabel_, 1);
+
+        layout->addLayout(statusLayout);
 
         setCentralWidget(centralWidget);
 
@@ -272,25 +411,203 @@ MainWindow::MainWindow(QWidget *parent) :
 
 
 /**
+ * handleConnectionInfoClicked()
+ * Displays local connection information in a temporary popup window
+ */
+void MainWindow::handleConnectionInfoClicked() {
+    const QHostAddress localAddress = NetworkInfo::preferredLocalIPv4Address();
+
+    const QString addressText =
+        localAddress.isNull()
+            ? "Unavailable"
+            : localAddress.toString();
+
+    // Qt::Popup creates a lightweight temporary window that closes automatically
+    // when the user clicks somewhere outside it.
+    QFrame *popup = new QFrame(
+        nullptr,                    // parent: A popup is positioned independently on the screen.
+        Qt::Popup                   // flags: Temporary popup behavior with outside-click dismissal.
+    );
+
+    // Delete the temporary popup automatically when Qt closes it.
+    popup->setAttribute(Qt::WA_DeleteOnClose);
+
+    popup->setFrameShape(QFrame::StyledPanel);
+
+    QLabel *titleLabel = new QLabel(
+        "Connection Information",
+        popup
+    );
+
+    // Make the popup heading visually distinct without creating another widget type.
+    QFont titleFont = titleLabel->font();
+    titleFont.setBold(true);
+    titleLabel->setFont(titleFont);
+
+    QLabel *addressNameLabel = new QLabel(
+        "Local IPv4 address:",
+        popup
+    );
+
+    QLabel *addressValueLabel = new QLabel(
+        addressText,
+        popup
+    );
+
+    QLabel *portNameLabel = new QLabel(
+        "Listening port:",
+        popup
+    );
+
+    QLabel *portValueLabel = new QLabel(
+        QString::number(connectionManager_.listeningPort()),
+        popup
+    );
+
+    // A two-column grid keeps each value on the same line as its description.
+    QGridLayout *infoLayout = new QGridLayout();
+
+    infoLayout->addWidget(
+        addressNameLabel,   // widget: Description of the address field.
+        0,                  // row: First information row.
+        0                   // column: Description column.
+    );
+
+    infoLayout->addWidget(
+        addressValueLabel,  // widget: Actual local IPv4 address.
+        0,                  // row: Same row as its description.
+        1                   // column: Value column.
+    );
+
+    infoLayout->addWidget(
+        portNameLabel,      // widget: Description of the listening-port field.
+        1,                  // row: Second information row.
+        0                   // column: Description column.
+    );
+
+    infoLayout->addWidget(
+        portValueLabel,     // widget: Actual TCP listening port.
+        1,                  // row: Same row as its description.
+        1                   // column: Value column.
+    );
+
+    QVBoxLayout *popupLayout = new QVBoxLayout(popup);
+
+    popupLayout->addWidget(titleLabel);
+    popupLayout->addLayout(infoLayout);
+
+    // Let the popup become only as large as its contents require.
+    popup->adjustSize();
+
+    // Position the popup immediately below the small connection-information control.
+    const QPoint popupPosition = connectionInfoButton_->mapToGlobal(
+        QPoint(
+            connectionInfoButton_->width() - popup->width(),
+            connectionInfoButton_->height()
+        )
+    );
+
+    popup->move(popupPosition);
+    popup->show();
+}
+
+
+/**
  * handleConnectClicked()
- * Validates the entered peer address and starts an outgoing connection
+ * Starts an outgoing connection to the selected nearby FileBridge device
  */
 void MainWindow::handleConnectClicked() {
-    // Prefer a discovered peer when the user has selected one in the nearby-devices list
     QListWidgetItem *selectedPeer = nearbyDevicesList_->currentItem();
 
-    if(selectedPeer != nullptr) {
-        connectToNearbyDevice(selectedPeer);
+    // Discovery-based connection requires the user to select one nearby device.
+    if(selectedPeer == nullptr) {
+        statusLabel_->setText("Select a nearby device");
         return;
     }
 
-    // No discovered peer is selected, so use the manually entered fallback address and port
-    const QHostAddress remoteAddress(remoteAddressEdit_->text());
+    connectToNearbyDevice(selectedPeer);
+}
+
+
+/**
+ * handleManualConnectionClicked()
+ * Displays a dialog for connecting directly to a peer by IP address and port
+ */
+void MainWindow::handleManualConnectionClicked() {
+    QDialog manualDialog(this);
+
+    manualDialog.setWindowTitle("Manual Connection");
+    manualDialog.setModal(true);
+
+    QLabel *addressLabel = new QLabel("IP address:", &manualDialog);
+    QLabel *portLabel = new QLabel("Port:", &manualDialog);
+
+    QLineEdit *addressEdit = new QLineEdit(&manualDialog);
+    QLineEdit *portEdit = new QLineEdit(&manualDialog);
+
+    addressEdit->setPlaceholderText("192.168.0.10");
+    portEdit->setPlaceholderText("Port");
+
+    // Restrict manual port input to the valid TCP port-number range.
+    portEdit->setValidator(
+        new QIntValidator(
+            1,          // bottom: Lowest valid TCP port accepted by this dialog.
+            65535,      // top: Highest possible TCP port.
+            portEdit    // parent: The line edit owns and destroys its validator.
+        )
+    );
+
+    QPushButton *cancelButton = new QPushButton("Cancel", &manualDialog);
+    QPushButton *connectManualButton = new QPushButton("Connect", &manualDialog);
+
+    connectManualButton->setDefault(true);
+
+    // Cancel closes the dialog without starting any network operation.
+    QObject::connect(
+        cancelButton,                    // Sender: Cancel button in the manual connection dialog.
+        &QPushButton::clicked,           // Signal: Emitted when the user clicks Cancel.
+        &manualDialog,                   // Receiver: The temporary manual connection dialog.
+        &QDialog::reject                 // Slot: Closes the dialog with a rejected result.
+    );
+
+    // Connect closes the dialog so its entered values can be validated below.
+    QObject::connect(
+        connectManualButton,             // Sender: Connect button in the manual connection dialog.
+        &QPushButton::clicked,           // Signal: Emitted when the user clicks Connect.
+        &manualDialog,                   // Receiver: The temporary manual connection dialog.
+        &QDialog::accept                 // Slot: Closes the dialog with an accepted result.
+    );
+
+    // Keep labels and their corresponding input fields aligned in two columns.
+    QGridLayout *inputLayout = new QGridLayout();
+
+    inputLayout->addWidget(addressLabel, 0, 0);
+    inputLayout->addWidget(addressEdit, 0, 1);
+    inputLayout->addWidget(portLabel, 1, 0);
+    inputLayout->addWidget(portEdit, 1, 1);
+
+    QHBoxLayout *buttonLayout = new QHBoxLayout();
+
+    buttonLayout->addStretch();
+    buttonLayout->addWidget(cancelButton);
+    buttonLayout->addWidget(connectManualButton);
+
+    QVBoxLayout *dialogLayout = new QVBoxLayout(&manualDialog);
+
+    dialogLayout->addLayout(inputLayout);
+    dialogLayout->addLayout(buttonLayout);
+
+    // Closing or cancelling the dialog does not change the current connection state.
+    if(manualDialog.exec() != QDialog::Accepted) {
+        return;
+    }
+
+    const QHostAddress remoteAddress(addressEdit->text());
 
     bool validPort = false;
-    const unsigned int remotePort = remotePortEdit_->text().toUInt(&validPort);
+    const unsigned int remotePort = portEdit->text().toUInt(&validPort);
 
-    // Reject incomplete or invalid connection information before reaching the network layer
+    // Reject malformed manual connection information before reaching ConnectionManager.
     if(remoteAddress.isNull() || !validPort || remotePort == 0 || remotePort > 65535) {
         statusLabel_->setText("Invalid IP address or port");
         return;
@@ -298,10 +615,11 @@ void MainWindow::handleConnectClicked() {
 
     statusLabel_->setText("Connecting...");
     connectButton_->setEnabled(false);
+    manualConnectionButton_->setEnabled(false);
 
     connectionManager_.connectToPeer(
-            remoteAddress,
-            static_cast<std::uint16_t>(remotePort)
+        remoteAddress,
+        static_cast<std::uint16_t>(remotePort)
     );
 }
 
@@ -325,6 +643,32 @@ void MainWindow::handleDisconnectClicked() {
         statusLabel_->setText("Failed to disconnect");
         disconnectButton_->setEnabled(true);
     }
+}
+
+
+/**
+ * handleSendModeClicked()
+ * Displays the outgoing-file page in the transfer area
+ */
+void MainWindow::handleSendModeClicked() {
+    // The Send page is the first page added to transferStack_ in the constructor.
+    transferStack_->setCurrentIndex(0);
+
+    // Pending incoming offers require attention again while the Receive page is hidden.
+    updateReceiveModeAttention();
+}
+
+
+/**
+ * handleReceiveModeClicked()
+ * Displays the incoming-file page in the transfer area
+ */
+void MainWindow::handleReceiveModeClicked() {
+    // The Receive page is the second page added to transferStack_ in the constructor.
+    transferStack_->setCurrentIndex(1);
+
+    // Viewing the Receive page clears the attention appearance but preserves the pending count.
+    updateReceiveModeAttention();
 }
 
 
@@ -468,9 +812,9 @@ void MainWindow::handlePeerReady(PeerConnection *connection) {
     statusLabel_->setText("Connected");
     connectButton_->setEnabled(false);
     disconnectButton_->setEnabled(true);
+    manualConnectionButton_->setEnabled(false);
 
-    // File selection becomes available only after the peer is ready for transfer messages
-    chooseFileButton_->setEnabled(true);
+    updateOutgoingQueueControls();
 }
 
 
@@ -487,7 +831,7 @@ void MainWindow::handleConnectionRejected(PeerConnection *connection) {
     statusLabel_->setText("Connection rejected");
     connectButton_->setEnabled(true);
     disconnectButton_->setEnabled(false);
-    chooseFileButton_->setEnabled(false);
+    manualConnectionButton_->setEnabled(true);
 }
 
 
@@ -506,39 +850,219 @@ void MainWindow::handlePeerDisconnected(PeerConnection *connection) {
     // Automatic file acceptance is trusted only for the lifetime of this connection.
     autoAcceptIncomingTransfers_ = false;
 
+    // Preserve unsent queue entries, but stop processing until another peer is connected
+    outgoingQueueSending_ = false;
+
     statusLabel_->setText("Disconnected");
     connectButton_->setEnabled(true);
     disconnectButton_->setEnabled(false);
-    chooseFileButton_->setEnabled(false);
+    manualConnectionButton_->setEnabled(true);
 
     acceptTransferButton_->setEnabled(false);
     rejectTransferButton_->setEnabled(false);
+
+    updateOutgoingQueueControls();
 }
 
 
 /**
- * handleChooseFileClicked()
- * Opens a file picker and asks the transfer manager to offer the selected file.
+ * handleAddFilesClicked()
+ * Opens a multi-file picker and adds the selected files to the outgoing queue
  */
-void MainWindow::handleChooseFileClicked() {
-    // Open file chooser to select file to send
-    const QString filePath = QFileDialog::getOpenFileName(this, "Choose file to send");
-    
-    // Closing the dialog without selecting a file is not an error.
-    if(filePath.isEmpty()) {
+void MainWindow::handleAddFilesClicked() {
+    // Native QFileDialog remains in use, but getOpenFileNames() allows several files
+    // to be selected during the same picker operation.
+    const QStringList filePaths = QFileDialog::getOpenFileNames(
+        this,
+        "Choose files to send"
+    );
+
+    // Closing the picker without selecting anything does not change the queue.
+    if(filePaths.isEmpty()) {
         return;
     }
 
-    // A transfer requires a currently validated FileBridge peer.
+    for(const QString& filePath : filePaths) {
+        const QFileInfo fileInfo(filePath);
+
+        // Ignore paths that no longer identify a regular file.
+        if(!fileInfo.exists() || !fileInfo.isFile()) {
+            continue;
+        }
+
+        bool alreadyQueued = false;
+
+        // Compare full paths rather than filenames because two different directories
+        // may legitimately contain files with the same visible name.
+        for(int index = 0; index < outgoingFilesList_->count(); ++index) {
+            QListWidgetItem *existingItem = outgoingFilesList_->item(index);
+
+            if(existingItem->data(OUTGOING_FILE_PATH_ROLE).toString() == fileInfo.absoluteFilePath()) {
+                alreadyQueued = true;
+                break;
+            }
+        }
+
+        if(alreadyQueued) {
+            continue;
+        }
+
+        QListWidgetItem *item = new QListWidgetItem(
+            fileInfo.fileName() +
+            "    " +
+            QString::number(fileInfo.size()) +
+            " bytes",
+            outgoingFilesList_
+        );
+
+        // Keep the full path out of the visible UI while preserving it for sending later.
+        item->setData(
+            OUTGOING_FILE_PATH_ROLE,       // Role: Hidden field reserved for the local file path.
+            fileInfo.absoluteFilePath()    // Value: Absolute path required when FileBridge later opens the file.
+        );
+    }
+    updateOutgoingQueueControls();
+}
+
+
+/**
+ * handleRemoveSelectedFilesClicked()
+ * Removes the selected files from the outgoing queue before they are sent
+ */
+void MainWindow::handleRemoveSelectedFilesClicked() {
+    const QList<QListWidgetItem *> selectedItems = outgoingFilesList_->selectedItems();
+
+    // Each QListWidgetItem is owned by the list until takeItem() removes it.
+    for(QListWidgetItem *item : selectedItems) {
+        const int row = outgoingFilesList_->row(item);
+
+        delete outgoingFilesList_->takeItem(row);
+    }
+
+    updateOutgoingQueueControls();
+}
+
+
+/**
+ * handleSendFilesClicked()
+ * Starts sending the queued files to the active peer one at a time
+ */
+void MainWindow::handleSendFilesClicked() {
     if(activePeer_ == nullptr) {
         statusLabel_->setText("No connected peer");
         return;
     }
 
-    // Delegate file validation, transfer-ID generation, and FileOffer creation to TransferManager.
-    if(!transferManager_.offerFile(activePeer_, filePath)) {
-        statusLabel_->setText("Failed to offer selected file");
+    if(outgoingFilesList_->count() == 0 || outgoingQueueSending_) {
         return;
+    }
+
+    // Lock queue editing until all currently queued files have been processed
+    outgoingQueueSending_ = true;
+    updateOutgoingQueueControls();
+    sendNextQueuedFile();
+}
+
+
+/**
+ * sendNextQueuedFile()
+ * Offers the first queued file and waits for its transfer to finish before continuing
+ */
+void MainWindow::sendNextQueuedFile() {
+    // Finishing the final queued file ends the outgoing queue operation
+    if(outgoingFilesList_->count() == 0) {
+        outgoingQueueSending_ = false;
+        statusLabel_->setText("Transfer completed");
+        updateOutgoingQueueControls();
+        return;
+    }
+
+    // Losing the peer stops queue processing but preserves unsent files for another attempt
+    if(activePeer_ == nullptr) {
+        outgoingQueueSending_ = false;
+        statusLabel_->setText("Disconnected");
+        updateOutgoingQueueControls();
+        return;
+    }
+
+    QListWidgetItem *item = outgoingFilesList_->item(0);
+    const QString filePath = item->data(OUTGOING_FILE_PATH_ROLE).toString();
+
+    // TransferManager validates the file again because it may have changed since it was queued
+    if(!transferManager_.offerFile(activePeer_, filePath)) {
+        outgoingQueueSending_ = false;
+        statusLabel_->setText("Failed to offer: " + item->text());
+        updateOutgoingQueueControls();
+
+        return;
+    }
+}
+
+
+void MainWindow::updateOutgoingQueueControls() {
+    const bool hasQueuedFiles = outgoingFilesList_->count() > 0;
+
+    // Queue contents should not be modified while the current batch is being processed
+    addFilesButton_->setEnabled(!outgoingQueueSending_);
+    removeSelectedFilesButton_->setEnabled(hasQueuedFiles && !outgoingQueueSending_);
+
+    // Sending requires both queued files and an approved active peer
+    sendFilesButton_->setEnabled(
+        hasQueuedFiles &&
+        activePeer_ != nullptr &&
+        !outgoingQueueSending_
+    );
+}
+
+
+/**
+ * updateReceiveModeAttention()
+ * Updates the Receive selector text and attention styling from pending incoming offers
+ */
+void MainWindow::updateReceiveModeAttention() {
+    int pendingCount = 0;
+
+    // Count only offers that still require an explicit receiver decision.
+    for(int index = 0; index < incomingFilesList_->count(); ++index) {
+        QListWidgetItem *item = incomingFilesList_->item(index);
+
+        if(item->data(INCOMING_TRANSFER_PENDING_ROLE).toBool()) {
+            ++pendingCount;
+        }
+    }
+
+    // Show the number of unresolved incoming offers directly in the selector.
+    receiveModeButton_->setText(
+        pendingCount > 0
+            ? "Receive (" + QString::number(pendingCount) + ")"
+            : "Receive"
+    );
+
+    // Draw attention to unresolved incoming files only while the Receive page
+    // is not currently being viewed.
+    const bool needsAttention =
+        pendingCount > 0 &&
+        !receiveModeButton_->isChecked();
+
+    // No icon is needed because the inverted button itself is the attention signal.
+    receiveModeButton_->setIcon(QIcon());
+
+    if(needsAttention) {
+        // Use a high-contrast inverted appearance while preserving rounded corners
+        // so the attention state still fits the surrounding macOS-style controls.
+        receiveModeButton_->setStyleSheet(
+            "QPushButton {"
+            "background-color: black;"
+            "color: white;"
+            "border: 1px solid black;"
+            "border-radius: 6px;"
+            "padding: 4px 10px;"
+            "}"
+        );
+    }
+    else {
+        // Clearing the stylesheet restores the normal platform button appearance.
+        receiveModeButton_->setStyleSheet(QString());
     }
 }
 
@@ -584,28 +1108,68 @@ void MainWindow::handleOutgoingTransferRejected(std::uint64_t transferId) {
 
     // Inform the sender that the receiving peer declined the offered file
     statusLabel_->setText("Transfer rejected");
+
+    // A rejection outside an active queue operation requires no queue advancement.
+    if(!outgoingQueueSending_) {
+        return;
+    }
+
+    // Remove the rejected outgoing file from the front of the queue.
+    if(outgoingFilesList_->count() > 0) {
+        delete outgoingFilesList_->takeItem(0);
+    }
+
+    // Continue with the next queued file, if one remains.
+    sendNextQueuedFile();
 }
 
 
 /**
  * handleOutgoingTransferCompleted()
- * Displays that an outgoing file transfer finished successfully.
+ * Removes a completed file from the outgoing queue and continues with the next queued file
  */
 void MainWindow::handleOutgoingTransferCompleted(std::uint64_t transferId) {
-    // The transfer ID will be used for more detailed per-transfer UI later.
     Q_UNUSED(transferId);
 
-    // Inform the sender that the file transfer finished successfully.
-    statusLabel_->setText("Transfer completed");
+    if(!outgoingQueueSending_) {
+        statusLabel_->setText("Transfer completed");
+        return;
+    }
+
+    // The first row represents the transfer that just completed
+    if(outgoingFilesList_->count() > 0) {
+        delete outgoingFilesList_->takeItem(0);
+    }
+
+    // Continue with the next queued file, or finish the batch if none remain
+    sendNextQueuedFile();
 }
+
 
 /**
  * handleIncomingTransferCompleted()
- * Displays that an incoming file transfer finished successfully.
+ * Marks an incoming transfer as completed and allows its list entry to be removed
  */
 void MainWindow::handleIncomingTransferCompleted(std::uint64_t transferId) {
-    // The transfer ID will be used for more detailed per-transfer UI later.
-    Q_UNUSED(transferId);
+    // Locate the list row representing the completed protocol transfer.
+    for(int index = 0; index < incomingFilesList_->count(); ++index) {
+        QListWidgetItem *item = incomingFilesList_->item(index);
+
+        const std::uint64_t itemTransferId =
+            item->data(INCOMING_TRANSFER_ID_ROLE).toULongLong();
+
+        if(itemTransferId != transferId) {
+            continue;
+        }
+
+        // Completed transfers are no longer pending and may now be removed from the visible history.
+        item->setData(INCOMING_TRANSFER_PENDING_ROLE, false);
+        item->setData(INCOMING_TRANSFER_REMOVABLE_ROLE, true);
+        break;
+    }
+
+    updateReceiveModeAttention();
+    updateIncomingRemoveControl();
 
     // Inform the receiver that the complete file was received and written successfully.
     statusLabel_->setText("Transfer completed");
@@ -614,9 +1178,40 @@ void MainWindow::handleIncomingTransferCompleted(std::uint64_t transferId) {
 
 /**
  * handleIncomingTransferOffered()
- * Automatically accepts or displays a newly received file offer according to the current connection policy
+ * Adds a newly offered file to the incoming list and applies the current connection approval policy
  */
 void MainWindow::handleIncomingTransferOffered(const TransferManager::IncomingTransfer& transfer) {
+    // Create one visible row for this incoming offer.
+    QListWidgetItem *item = new QListWidgetItem(
+        transfer.fileName +
+        "    " +
+        QString::number(transfer.fileSize) +
+        " bytes",
+        incomingFilesList_
+    );
+
+    // Store the protocol transfer ID invisibly in the row so later Accept/Reject
+    // actions can identify the exact TransferManager transfer represented by it.
+    item->setData(
+        INCOMING_TRANSFER_ID_ROLE,                         // Role: Hidden field reserved for the incoming transfer ID.
+        static_cast<qulonglong>(transfer.transferId)       // Value: Sender-assigned identifier used by transfer messages.
+    );
+
+    // Manual incoming offer begin in the pending state until the receiver accepts or rejects them
+    item->setData(
+        INCOMING_TRANSFER_PENDING_ROLE,
+        !autoAcceptIncomingTransfers_
+    );
+
+    // A new incoming transfer must remain visible until it completes or is rejected.
+    item->setData(
+        INCOMING_TRANSFER_REMOVABLE_ROLE,
+        false
+    );
+
+    // Refresh the Receive selector before processing the connection's approval policy
+    updateReceiveModeAttention();
+
     // Automatically accept the offer when the user trusted incoming files for this connection.
     if(autoAcceptIncomingTransfers_) {
         if(!transferManager_.acceptIncomingTransfer(transfer.transferId)) {
@@ -624,12 +1219,8 @@ void MainWindow::handleIncomingTransferOffered(const TransferManager::IncomingTr
             return;
         }
 
-        // No manual decision is pending because this offer was accepted immediately.
-        pendingIncomingTransferId_ = 0;
-        pendingIncomingFileName_.clear();
-
-        acceptTransferButton_->setEnabled(false);
-        rejectTransferButton_->setEnabled(false);
+        // Automatic acceptance leaves no user decision pending for this row
+        updateIncomingDecisionControls();
 
         statusLabel_->setText(
             "Receiving: " +
@@ -642,12 +1233,8 @@ void MainWindow::handleIncomingTransferOffered(const TransferManager::IncomingTr
         return;
     }
 
-    // Manual mode remembers the transfer so the existing Accept and Reject buttons can act on it.
-    pendingIncomingTransferId_ = transfer.transferId;
-    pendingIncomingFileName_ = transfer.fileName;
-
-    acceptTransferButton_->setEnabled(true);
-    rejectTransferButton_->setEnabled(true);
+    // Manual mode leaves this row pending until the user explicitly selects and resolves it.
+    updateIncomingDecisionControls();
 
     statusLabel_->setText(
         "Incoming offer: " +
@@ -660,55 +1247,151 @@ void MainWindow::handleIncomingTransferOffered(const TransferManager::IncomingTr
 
 
 /**
- * handleAcceptTransferClicked()
- * Accepts the currently displayed incoming transfer using the configured download directory.
+ * handleAcceptSelectedIncomingClicked()
+ * Accepts each pending incoming transfer selected in the Receive list
  */
-void MainWindow::handleAcceptTransferClicked() {
-    // A zero identifier means there is no incoming transfer awaiting a decision.
-    if(pendingIncomingTransferId_ == 0) {
+void MainWindow::handleAcceptSelectedIncomingClicked() {
+    const QList<QListWidgetItem *> selectedItems = incomingFilesList_->selectedItems();
+
+    int acceptedCount = 0;
+
+    for(QListWidgetItem *item : selectedItems) {
+        // Resolved rows cannot be accepted again.
+        if(!item->data(INCOMING_TRANSFER_PENDING_ROLE).toBool()) {
+            continue;
+        }
+
+        const std::uint64_t transferId =
+            item->data(INCOMING_TRANSFER_ID_ROLE).toULongLong();
+
+        // Leave this row pending if TransferManager cannot send its acceptance.
+        if(!transferManager_.acceptIncomingTransfer(transferId)) {
+            continue;
+        }
+
+        // Acceptance resolves the user's decision, but the row cannot be removed
+        // until the actual file transfer reaches completion.
+        item->setData(INCOMING_TRANSFER_PENDING_ROLE, false);
+        item->setData(INCOMING_TRANSFER_REMOVABLE_ROLE, false);
+
+        ++acceptedCount;
+    }
+
+    updateReceiveModeAttention();
+    updateIncomingDecisionControls();
+    updateIncomingRemoveControl();
+
+    if(acceptedCount == 0) {
+        statusLabel_->setText("No selected incoming transfers were accepted");
         return;
     }
 
-    // Accept the transfer using TransferManager's configured default download directory.
-    if(!transferManager_.acceptIncomingTransfer(pendingIncomingTransferId_)) {
-        statusLabel_->setText("Failed to accept incoming transfer");
-        return;
-    }
-
-    // The offer is no longer awaiting an Accept or Reject decision.
-    pendingIncomingTransferId_ = 0;
-    pendingIncomingFileName_.clear();
-
-    acceptTransferButton_->setEnabled(false);
-    rejectTransferButton_->setEnabled(false);
-
-    statusLabel_->setText("Transfer accepted");
+    statusLabel_->setText(
+        acceptedCount == 1
+            ? "Transfer accepted"
+            : QString::number(acceptedCount) + " transfers accepted"
+    );
 }
 
 
 /**
- * handleRejectTransferClicked()
- * Rejects the currently displayed incoming transfer
+ * handleRejectSelectedIncomingClicked()
+ * Rejects each pending incoming transfer selected in the Receive list
  */
-void MainWindow::handleRejectTransferClicked() {
-    // A zero identifier means there is no incoming transfer awaiting a decision
-    if(pendingIncomingTransferId_ == 0) {
+void MainWindow::handleRejectSelectedIncomingClicked() {
+    const QList<QListWidgetItem *> selectedItems = incomingFilesList_->selectedItems();
+
+    int rejectedCount = 0;
+
+    for(QListWidgetItem *item : selectedItems) {
+        // Resolved rows cannot be rejected again.
+        if(!item->data(INCOMING_TRANSFER_PENDING_ROLE).toBool()) {
+            continue;
+        }
+
+        const std::uint64_t transferId =
+            item->data(INCOMING_TRANSFER_ID_ROLE).toULongLong();
+
+        // Leave this row pending if TransferManager cannot send its rejection.
+        if(!transferManager_.rejectIncomingTransfer(transferId)) {
+            continue;
+        }
+
+        // Rejection completely resolves the transfer, so its history row may
+        // now be removed whenever the user chooses.
+        item->setData(INCOMING_TRANSFER_PENDING_ROLE, false);
+        item->setData(INCOMING_TRANSFER_REMOVABLE_ROLE, true);
+
+        ++rejectedCount;
+    }
+
+    updateReceiveModeAttention();
+    updateIncomingDecisionControls();
+    updateIncomingRemoveControl();
+
+    if(rejectedCount == 0) {
+        statusLabel_->setText("No selected incoming transfers were rejected");
         return;
     }
 
-    // Ask TransferManager to send the FileReject response to the original sender
-    if(!transferManager_.rejectIncomingTransfer(pendingIncomingTransferId_)) {
-        statusLabel_->setText("Failed to reject incoming transfer");
-        return;
+    statusLabel_->setText(
+        rejectedCount == 1
+            ? "Transfer rejected"
+            : QString::number(rejectedCount) + " transfers rejected"
+    );
+}
+
+
+/**
+ * handleRemoveSelectedIncomingClicked()
+ * Removes completed or rejected transfers selected in the incoming list
+ */
+void MainWindow::handleRemoveSelectedIncomingClicked() {
+    const QList<QListWidgetItem *> selectedItems = incomingFilesList_->selectedItems();
+    for(QListWidgetItem *item : selectedItems) {
+        // Pending or active transfers remain visible until their lifecycle is resolved.
+        if(!item->data(INCOMING_TRANSFER_REMOVABLE_ROLE).toBool()) {
+            continue;
+        }
+        const int row = incomingFilesList_->row(item);
+        // takeItem() transfers ownership away from QListWidget, so delete the returned item.
+        delete incomingFilesList_->takeItem(row);
     }
+    updateIncomingRemoveControl();
+}
 
-    // The rejected offer no longer needs a pending user decision
-    pendingIncomingTransferId_ = 0;
-    pendingIncomingFileName_.clear();
-    acceptTransferButton_->setEnabled(false);
-    rejectTransferButton_->setEnabled(false);
+/**
+ * updateIncomingRemoveControl()
+ * Enables Remove Selected when at least one selected incoming transfer may be removed
+ */
+void MainWindow::updateIncomingRemoveControl() {
+    bool hasRemovableSelection = false;
+    const QList<QListWidgetItem *> selectedItems = incomingFilesList_->selectedItems();
+    for(QListWidgetItem *item : selectedItems) {
+        if(item->data(INCOMING_TRANSFER_REMOVABLE_ROLE).toBool()) {
+            hasRemovableSelection = true;
+            break;
+        }
+    }
+    removeSelectedIncomingButton_->setEnabled(hasRemovableSelection);
+}
 
-    statusLabel_->setText("Transfer rejected");
+
+/**
+ * updateIncomingDecisionControls()
+ * Enables Accept Selected and Reject Selected when a pending incoming transfer is selected
+ */
+void MainWindow::updateIncomingDecisionControls() {
+    bool hasPendingSelection = false;
+    const QList<QListWidgetItem *> selectedItems = incomingFilesList_->selectedItems();
+    for(QListWidgetItem *item : selectedItems) {
+        if(item->data(INCOMING_TRANSFER_PENDING_ROLE).toBool()) {
+            hasPendingSelection = true;
+            break;
+        }
+    }
+    acceptTransferButton_->setEnabled(hasPendingSelection);
+    rejectTransferButton_->setEnabled(hasPendingSelection);
 }
 
 
@@ -717,8 +1400,9 @@ void MainWindow::handleRejectTransferClicked() {
  * Displays an outgoing connection failure in the interface
  */
 void MainWindow::handleConnectionFailed(const QString& errorMessage) {
-    statusLabel_->setText("Connection failed:" + errorMessage);
+    statusLabel_->setText("Connection failed: " + errorMessage);
     connectButton_->setEnabled(true);
+    manualConnectionButton_->setEnabled(true);
 }
 
 

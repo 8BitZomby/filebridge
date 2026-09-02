@@ -6,11 +6,14 @@
 #include "Protocol.hpp"
 #include "TransferManager.hpp"
 
+#include <QButtonGroup>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMainWindow>
 #include <QPushButton>
+#include <QStackedWidget>
+#include <QToolButton>
 
 
 /**
@@ -31,15 +34,40 @@ class MainWindow : public QMainWindow {
     private slots:
 
         /**
+         * handleConnectionInfoClicked()
+         * Displays the local IP address and listening port used for manual connections
+         */
+        void handleConnectionInfoClicked();
+
+        /**
          * handleConnectClicked()
          * Validates the entered peer address and starts an outgoing connection
          */
         void handleConnectClicked();
 
-        /** handleDisconnectClicked()
+        /**
+         * handleManualConnectionClicked()
+         * Displays a dialog for connecting directly to a peer by IP address and port
+         */
+        void handleManualConnectionClicked();
+
+        /** 
+         * handleDisconnectClicked()
          * Disconnects the currently active FileBridge peer
          */
         void handleDisconnectClicked();
+
+        /**
+         * handleSendModeClicked()
+         * Displays the outgoing-file page in the transfer area
+         */
+        void handleSendModeClicked();
+
+        /**
+         * handleReceiveModeClicked()
+         * Displays the incoming-file page in the transfer area
+         */
+        void handleReceiveModeClicked();
 
         /**
          * handleConnectionApprovalRequested()
@@ -88,22 +116,40 @@ class MainWindow : public QMainWindow {
         void handleIncomingTransferOffered(const TransferManager::IncomingTransfer& transfer);
 
         /**
-         * handleAcceptTransferClicked()
+         * handleAcceptSelectedIncomingClicked()
          * Accepts the currently displayed incoming transfer
          */
-        void handleAcceptTransferClicked();
+        void handleAcceptSelectedIncomingClicked();
 
         /**
-         * handleRejectTransferClicked()
+         * handleRejectSelectedIncomingClicked()
          * Rejects the currently displayed incoming transfer
          */
-        void handleRejectTransferClicked();
+        void handleRejectSelectedIncomingClicked();
 
         /**
-         * handleChooseFileClicked()
-         * Opens a file picker and prepares metadata for the selected file
+         * handleRemoveSelectedIncomingClicked()
+         * Removes completed or rejected transfers selected in the incoming list
          */
-        void handleChooseFileClicked();
+        void handleRemoveSelectedIncomingClicked();
+
+        /**
+         * handleAddFilesClicked()
+         * Opens a multi-file picker and add the selected files to the outgoing queue
+         */
+        void handleAddFilesClicked();
+
+        /**
+         * handleRemoveSelectedFilesClicked()
+         * Removes the selected files from the outgoing queue before they are sent
+         */
+        void handleRemoveSelectedFilesClicked();
+
+        /**
+         * handleSendFilesClicked()
+         * Strarts sending the queued files to the active peer one at a time
+         */
+        void handleSendFilesClicked();
 
         /**
          * handleOutgoingTransferCompleted()
@@ -149,7 +195,37 @@ class MainWindow : public QMainWindow {
          */
         void connectToNearbyDevice(QListWidgetItem *item);
 
-        // Handle QListWidgetItem data role containing the peer's unique running-instance ID
+        /**
+         * sendNextQueuedFile()
+         * Offers the first queued file and waits for its transfer to finish before continuing
+         */
+        void sendNextQueuedFile();
+
+        /**
+         * updateOutgoingQueueControls()
+         * Updates queue-button availability from the current connection and sending state
+         */
+        void updateOutgoingQueueControls();
+
+        /**
+         * updateReceiveModeAttention()
+         * Updates the Receive selector text and attention styling from pending incoming offers
+         */
+        void updateReceiveModeAttention();
+
+        /**
+         * updateIncomingRemoveControl()
+         * Enables Remove Selected when at least one selected incoming transfer may be removed
+         */
+        void updateIncomingRemoveControl();
+
+        /**
+         * updateIncomingDecisionControls()
+         * Enables Accept Selected and Reject Selected when a pending incoming transfer is selected
+         */
+        void updateIncomingDecisionControls();
+
+        // Hidden QListWidgetItem data role containing the peer's unique running-instance ID
         static constexpr int NEARBY_DEVICE_INSTANCE_ID_ROLE = Qt::UserRole;
 
         // Hidden QListWidgetItem data role containing the peer's IPv4 address
@@ -157,6 +233,18 @@ class MainWindow : public QMainWindow {
 
         // Hidden QListWidgetItem data role containing the peer's TCP listening port
         static constexpr int NEARBY_DEVICE_PORT_ROLE = Qt::UserRole + 2;
+
+        // Hidden QListWidgetItem data role containing an outgoing file's full local path
+        static constexpr int OUTGOING_FILE_PATH_ROLE = Qt::UserRole;
+
+        // Hidden QListWidgetItem data role containing an incoming file's transfer identifier
+        static constexpr int INCOMING_TRANSFER_ID_ROLE = Qt::UserRole;
+
+        // Hidden QListWidgetItem data role indicating whether an incoming offer still needs a decision
+        static constexpr int INCOMING_TRANSFER_PENDING_ROLE = Qt::UserRole + 1;
+
+        // Hidden QListWidgetItem data role indicating whether the row may be removed from transfer history
+        static constexpr int INCOMING_TRANSFER_REMOVABLE_ROLE = Qt::UserRole + 2;
 
         // Discovers nearby FileBridge instances on the local network
         PeerDiscovery *peerDiscovery_;
@@ -173,23 +261,11 @@ class MainWindow : public QMainWindow {
         // Controls whether incoming file offers are accepted automatically for the current connection
         bool autoAcceptIncomingTransfers_;
 
-        // Identifies the incoming transfer currently awaiting a used decision
-        std::uint64_t pendingIncomingTransferId_;
+        // Becomes true while FileBridge is processing the current outgoing file queue
+        bool outgoingQueueSending_;
 
-        // Stores the original filename for the incoming transfer acaiting a user decision
-        QString pendingIncomingFileName_;
-
-        // Displays the preferred local IPv4 address
-        QLabel *localAddressLabel_;
-
-        // Displays the automatically selected listening port
-        QLabel *localPortLabel_;
-
-        // Accepts the remote peer IPv4 address entered by the user
-        QLineEdit *remoteAddressEdit_;
-
-        // Accepts the remote peer listening port entered by the user
-        QLineEdit *remotePortEdit_;
+        // Opens a dialog showing local address and listening-port information
+        QToolButton *connectionInfoButton_;
 
         // Displays FileBridge instances currently discovered on the local network
         QListWidget *nearbyDevicesList_;
@@ -200,14 +276,44 @@ class MainWindow : public QMainWindow {
         // Disconnects the currently active FileBridge peer
         QPushButton *disconnectButton_;
 
-        // Opens a file picker so the user can choose a file to offer to the connected peer
-        QPushButton *chooseFileButton_;
+        // Opens the direct IP-address and port connection dialog
+        QPushButton *manualConnectionButton_;
 
-        // Accepts the currently displayed incoming file offer
+        // Groups the Send and Receive mode button so only one can be selected at a time
+        QButtonGroup *transferModeButtonGroup_;
+
+        // Selects the outgoing-file page of the transfer area
+        QPushButton *sendModeButton_;
+
+        // Selects the incoming-file page and dispays pending-offer attention information
+        QPushButton *receiveModeButton_;
+
+        // Displays either the Send page or Receive page without changing the window size
+        QStackedWidget *transferStack_;
+
+        // Displays files queued locally for the next outgoing transfer
+        QListWidget *outgoingFilesList_;
+
+        // Opens a multi-file picker and adds selected files to the outgoing queue
+        QPushButton *addFilesButton_;
+
+        // Removes selected files from the outgoing queue before sending
+        QPushButton *removeSelectedFilesButton_;
+
+        // Starts sending the files currently stored in the outgoing queue
+        QPushButton *sendFilesButton_;
+
+        // Starts sending the files currenly stored in the outgoing queue
+        QListWidget *incomingFilesList_;
+
+        // Accepts the pending incoming file selected in the Receive list
         QPushButton *acceptTransferButton_;
 
-        // Rejects the currently displayed incoming file offer
+        // Rejects the pending incoming file selected in the Receive list
         QPushButton *rejectTransferButton_;
+
+        // Removes selected completed or rejected entries from the incoming transfer list
+        QPushButton *removeSelectedIncomingButton_;
 
         // Displays the current FileBridge connection status
         QLabel *statusLabel_;
