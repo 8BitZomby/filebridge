@@ -8,6 +8,7 @@
 #include <QString>
 
 #include <cstdint>
+#include <optional>
 #include <unordered_map>
 
 
@@ -64,9 +65,9 @@ class TransferManager : public QObject {
         
         /**
          * offerFile()
-         * Creates and sends a new file-transfer offer to a ready peer
+         * Creates and sends a new file-transfer offer and returns its transfer ID on success
          */
-        bool offerFile(PeerConnection *connection, const QString& filePath);
+        std::optional<std::uint64_t> offerFile(PeerConnection *connection, const QString& filePath);
 
         /**
          * acceptIncomingTransfer()
@@ -150,6 +151,12 @@ class TransferManager : public QObject {
          * Finalizes an incoming transfer after the sender reports completion
          */
         void handleFileCompleteReceived(PeerConnection *connection, const Protocol::FileCompletePayload& complete);
+
+        /**
+         * handlePeerDisconnected()
+         * Removes transfer state associated with a peer that is no longer connected
+         */
+        void handlePeerDisconnected(PeerConnection *connection);
 
     private:
 

@@ -47,8 +47,8 @@ MainWindow::MainWindow(QWidget *parent) :
     removeSelectedFilesButton_(new QPushButton("Remove Selected", this)),
     sendFilesButton_(new QPushButton("Send", this)),
     incomingFilesList_(new QListWidget(this)),
-    acceptTransferButton_(new QPushButton("Accept Selected", this)),
-    rejectTransferButton_(new QPushButton("Reject Selected", this)),
+    acceptTransferButton_(new QPushButton("Accept All", this)),
+    rejectTransferButton_(new QPushButton("Reject All", this)),
     removeSelectedIncomingButton_(new QPushButton("Remove Selected", this)),
     statusLabel_(new QLabel("Ready", this)) {
 
@@ -210,7 +210,7 @@ MainWindow::MainWindow(QWidget *parent) :
             acceptTransferButton_,                          // Sender: Accept button in the FileBridge window
             &QPushButton::clicked,                          // Signal: Emitted when the user clicks the button
             this,                                           // Receiver: This MainWindow instance
-            &MainWindow::handleAcceptSelectedIncomingClicked // Slot: Accepts each selected incoming transfer
+            &MainWindow::handleAcceptAllIncomingClicked // Slot: Accepts each selected incoming transfer
         );
 
         // Reject the currently displayed incoming transfer when the user clicks Reject
@@ -218,7 +218,7 @@ MainWindow::MainWindow(QWidget *parent) :
             rejectTransferButton_,                          // Sender: Reject button in the FileBridge window
             &QPushButton::clicked,                          // Signal: Emitted when the user clicks the button
             this,                                           // Receiver: This MainWindow instance
-            &MainWindow::handleRejectSelectedIncomingClicked // Slot: Rejects each selected incoming transfer
+            &MainWindow::handleRejectAllIncomingClicked // Slot: Rejects each selected incoming transfer
         );
 
         // Remove completed or rejected incoming-transfer rows selected by the user.
@@ -235,14 +235,6 @@ MainWindow::MainWindow(QWidget *parent) :
             &QListWidget::itemSelectionChanged,             // Signal: Emitted whenever the selected rows change.
             this,                                           // Receiver: This MainWindow instance.
             &MainWindow::updateIncomingRemoveControl        // Slot: Updates Remove Selected availability.
-        );
-
-        // Recalculate whether Accept Selected and Reject Selected are available when selection changes.
-        QObject::connect(
-            incomingFilesList_,                                 // Sender: Incoming-transfer list.
-            &QListWidget::itemSelectionChanged,                 // Signal: Emitted whenever the selected rows change.
-            this,                                               // Receiver: This MainWindow instance.
-            &MainWindow::updateIncomingDecisionControls         // Slot: Updates incoming decision-button availability.
         );
 
         // Ask the local user whether an incoming FileBridge connection should be trusted.
@@ -850,8 +842,19 @@ void MainWindow::handlePeerDisconnected(PeerConnection *connection) {
     // Automatic file acceptance is trusted only for the lifetime of this connection.
     autoAcceptIncomingTransfers_ = false;
 
-    // Preserve unsent queue entries, but stop processing until another peer is connected
+    // Preserve the visible queue, but stop processing until another peer is connected.
     outgoingQueueSending_ = false;
+
+    // Transfer IDs belong to the disconnected peer and must not be reused if
+    // these queued files are offered again after a later reconnection.
+    for(int index = 0; index < outgoingFilesList_->count(); ++index) {
+        QListWidgetItem *item = outgoingFilesList_->item(index);
+
+        item->setData(
+            OUTGOING_TRANSFER_ID_ROLE,
+            QVariant()
+        );
+    }
 
     statusLabel_->setText("Disconnected");
     connectButton_->setEnabled(true);
@@ -960,16 +963,16 @@ void MainWindow::handleSendFilesClicked() {
     // Lock queue editing until all currently queued files have been processed
     outgoingQueueSending_ = true;
     updateOutgoingQueueControls();
-    sendNextQueuedFile();
+    offerQueuedFiles();
 }
 
 
 /**
- * sendNextQueuedFile()
- * Offers the first queued file and waits for its transfer to finish before continuing
+ * offerQueuedFiles()
+ * Sends file offers for every queued file that has not already been offered
  */
-void MainWindow::sendNextQueuedFile() {
-    // Finishing the final queued file ends the outgoing queue operation
+void MainWindow::offerQueuedFiles() {
+    // An empty queue means every file in the current batch has been resolved.
     if(outgoingFilesList_->count() == 0) {
         outgoingQueueSending_ = false;
         statusLabel_->setText("Transfer completed");
@@ -977,7 +980,7 @@ void MainWindow::sendNextQueuedFile() {
         return;
     }
 
-    // Losing the peer stops queue processing but preserves unsent files for another attempt
+    // Losing the peer stops batch processing but preserves the queue for another attempt.
     if(activePeer_ == nullptr) {
         outgoingQueueSending_ = false;
         statusLabel_->setText("Disconnected");
@@ -985,17 +988,61 @@ void MainWindow::sendNextQueuedFile() {
         return;
     }
 
-    QListWidgetItem *item = outgoingFilesList_->item(0);
-    const QString filePath = item->data(OUTGOING_FILE_PATH_ROLE).toString();
+    int offeredCount = 0;
+    int failedCount = 0;
 
-    // TransferManager validates the file again because it may have changed since it was queued
-    if(!transferManager_.offerFile(activePeer_, filePath)) {
+    // Offer every queued row that has not already been associated with a protocol transfer.
+    for(int index = 0; index < outgoingFilesList_->count(); ++index) {
+        QListWidgetItem *item = outgoingFilesList_->item(index);
+
+        // A valid transfer ID means this file has already been offered and is
+        // waiting for the receiver to accept, reject, or complete the transfer.
+        if(item->data(OUTGOING_TRANSFER_ID_ROLE).isValid()) {
+            continue;
+        }
+
+        const QString filePath =
+            item->data(OUTGOING_FILE_PATH_ROLE).toString();
+
+        // Revalidate the file because it may have changed since it was queued.
+        const std::optional<std::uint64_t> transferId =
+            transferManager_.offerFile(activePeer_, filePath);
+
+        if(!transferId.has_value()) {
+            ++failedCount;
+            continue;
+        }
+
+        // Associate this exact queue row with the exact protocol transfer created for it.
+        item->setData(
+            OUTGOING_TRANSFER_ID_ROLE,
+            static_cast<qulonglong>(*transferId)
+        );
+
+        ++offeredCount;
+    }
+
+    // If every attempted offer failed, unlock the queue so the user can correct it.
+    if(offeredCount == 0 && failedCount > 0) {
         outgoingQueueSending_ = false;
-        statusLabel_->setText("Failed to offer: " + item->text());
+        statusLabel_->setText("Failed to offer queued file(s)");
         updateOutgoingQueueControls();
-
         return;
     }
+
+    if(failedCount > 0) {
+        statusLabel_->setText(
+            QString::number(offeredCount) +
+            " file(s) offered, " +
+            QString::number(failedCount) +
+            " failed"
+        );
+        return;
+    }
+
+    statusLabel_->setText(
+        QString::number(offeredCount) + " file(s) offered"
+    );
 }
 
 
@@ -1069,12 +1116,12 @@ void MainWindow::updateReceiveModeAttention() {
 
 /**
  * handleOutgoingTransferOffered()
- * Displays metadata for a file successfully offered to the connected peer.
+ * Displays metadata for a file successfully offered to the connected peer
  */
 void MainWindow::handleOutgoingTransferOffered(std::uint64_t transferId, const QString& fileName, std::uint64_t fileSize) {
+    // Row-to-transfer association is performed directly by the code that called offerFile().
     Q_UNUSED(transferId);
 
-    // Display the outgoing transfer while the dedicated transfer UI is still under development.
     statusLabel_->setText(
         "Offered: " +
         fileName +
@@ -1100,49 +1147,61 @@ void MainWindow::handleOutgoingTransferAccepted(std::uint64_t transferId) {
 
 /**
  * handleOutgoingTransferRejected()
- * Displays that the remote peer rejected an outgoing transfer
+ * Removes the outgoing queue row matching the rejected transfer ID
  */
 void MainWindow::handleOutgoingTransferRejected(std::uint64_t transferId) {
-    // The transfer ID will be used for more detailed transfer tracking tracking later
-    Q_UNUSED(transferId);
+    // Find the exact queue row associated with the rejected protocol transfer.
+    for(int index = 0; index < outgoingFilesList_->count(); ++index) {
+        QListWidgetItem *item = outgoingFilesList_->item(index);
 
-    // Inform the sender that the receiving peer declined the offered file
+        const std::uint64_t itemTransferId =
+            item->data(OUTGOING_TRANSFER_ID_ROLE).toULongLong();
+
+        if(itemTransferId != transferId) {
+            continue;
+        }
+
+        // takeItem() removes the row from QListWidget ownership, so delete the returned item.
+        delete outgoingFilesList_->takeItem(index);
+        break;
+    }
+
     statusLabel_->setText("Transfer rejected");
 
-    // A rejection outside an active queue operation requires no queue advancement.
-    if(!outgoingQueueSending_) {
-        return;
+    // Preserve the current sequential behavior until batch offering is introduced.
+    if(outgoingQueueSending_) {
+        offerQueuedFiles();
     }
-
-    // Remove the rejected outgoing file from the front of the queue.
-    if(outgoingFilesList_->count() > 0) {
-        delete outgoingFilesList_->takeItem(0);
-    }
-
-    // Continue with the next queued file, if one remains.
-    sendNextQueuedFile();
 }
 
 
 /**
  * handleOutgoingTransferCompleted()
- * Removes a completed file from the outgoing queue and continues with the next queued file
+ * Removes the outgoing queue row matching the completed transfer ID
  */
 void MainWindow::handleOutgoingTransferCompleted(std::uint64_t transferId) {
-    Q_UNUSED(transferId);
+    // Find the exact queue row associated with the completed protocol transfer.
+    for(int index = 0; index < outgoingFilesList_->count(); ++index) {
+        QListWidgetItem *item = outgoingFilesList_->item(index);
 
-    if(!outgoingQueueSending_) {
-        statusLabel_->setText("Transfer completed");
-        return;
+        const std::uint64_t itemTransferId =
+            item->data(OUTGOING_TRANSFER_ID_ROLE).toULongLong();
+
+        if(itemTransferId != transferId) {
+            continue;
+        }
+
+        // Remove only the row for this completed transfer.
+        delete outgoingFilesList_->takeItem(index);
+        break;
     }
 
-    // The first row represents the transfer that just completed
-    if(outgoingFilesList_->count() > 0) {
-        delete outgoingFilesList_->takeItem(0);
-    }
+    statusLabel_->setText("Transfer completed");
 
-    // Continue with the next queued file, or finish the batch if none remain
-    sendNextQueuedFile();
+    // Preserve the current sequential behavior until batch offering is introduced.
+    if(outgoingQueueSending_) {
+        offerQueuedFiles();
+    }
 }
 
 
@@ -1247,16 +1306,18 @@ void MainWindow::handleIncomingTransferOffered(const TransferManager::IncomingTr
 
 
 /**
- * handleAcceptSelectedIncomingClicked()
- * Accepts each pending incoming transfer selected in the Receive list
+ * handleAcceptAllIncomingClicked()
+ * Accepts every pending incoming transfer in the Receive list
  */
-void MainWindow::handleAcceptSelectedIncomingClicked() {
-    const QList<QListWidgetItem *> selectedItems = incomingFilesList_->selectedItems();
-
+void MainWindow::handleAcceptAllIncomingClicked() {
     int acceptedCount = 0;
 
-    for(QListWidgetItem *item : selectedItems) {
-        // Resolved rows cannot be accepted again.
+    // Visit every visible incoming transfer because Accept All is independent
+    // of the current QListWidget selection.
+    for(int index = 0; index < incomingFilesList_->count(); ++index) {
+        QListWidgetItem *item = incomingFilesList_->item(index);
+
+        // Resolved transfers must not be accepted again.
         if(!item->data(INCOMING_TRANSFER_PENDING_ROLE).toBool()) {
             continue;
         }
@@ -1269,8 +1330,8 @@ void MainWindow::handleAcceptSelectedIncomingClicked() {
             continue;
         }
 
-        // Acceptance resolves the user's decision, but the row cannot be removed
-        // until the actual file transfer reaches completion.
+        // Acceptance resolves the approval decision, but the row remains
+        // non-removable until the actual file transfer completes.
         item->setData(INCOMING_TRANSFER_PENDING_ROLE, false);
         item->setData(INCOMING_TRANSFER_REMOVABLE_ROLE, false);
 
@@ -1282,7 +1343,7 @@ void MainWindow::handleAcceptSelectedIncomingClicked() {
     updateIncomingRemoveControl();
 
     if(acceptedCount == 0) {
-        statusLabel_->setText("No selected incoming transfers were accepted");
+        statusLabel_->setText("No pending incoming transfers were accepted");
         return;
     }
 
@@ -1295,16 +1356,18 @@ void MainWindow::handleAcceptSelectedIncomingClicked() {
 
 
 /**
- * handleRejectSelectedIncomingClicked()
- * Rejects each pending incoming transfer selected in the Receive list
+ * handleRejectAllIncomingClicked()
+ * Rejects every pending incoming transfer in the Receive list
  */
-void MainWindow::handleRejectSelectedIncomingClicked() {
-    const QList<QListWidgetItem *> selectedItems = incomingFilesList_->selectedItems();
-
+void MainWindow::handleRejectAllIncomingClicked() {
     int rejectedCount = 0;
 
-    for(QListWidgetItem *item : selectedItems) {
-        // Resolved rows cannot be rejected again.
+    // Visit every visible incoming transfer because Reject All is independent
+    // of the current QListWidget selection.
+    for(int index = 0; index < incomingFilesList_->count(); ++index) {
+        QListWidgetItem *item = incomingFilesList_->item(index);
+
+        // Resolved transfers must not be rejected again.
         if(!item->data(INCOMING_TRANSFER_PENDING_ROLE).toBool()) {
             continue;
         }
@@ -1330,7 +1393,7 @@ void MainWindow::handleRejectSelectedIncomingClicked() {
     updateIncomingRemoveControl();
 
     if(rejectedCount == 0) {
-        statusLabel_->setText("No selected incoming transfers were rejected");
+        statusLabel_->setText("No pending incoming transfers were rejected");
         return;
     }
 
@@ -1344,54 +1407,90 @@ void MainWindow::handleRejectSelectedIncomingClicked() {
 
 /**
  * handleRemoveSelectedIncomingClicked()
- * Removes completed or rejected transfers selected in the incoming list
+ * Rejects unresolved selected transfers and removes selected entries from the incoming list
  */
 void MainWindow::handleRemoveSelectedIncomingClicked() {
     const QList<QListWidgetItem *> selectedItems = incomingFilesList_->selectedItems();
+
     for(QListWidgetItem *item : selectedItems) {
-        // Pending or active transfers remain visible until their lifecycle is resolved.
-        if(!item->data(INCOMING_TRANSFER_REMOVABLE_ROLE).toBool()) {
+        // A pending transfer must be explicitly rejected before its visible row
+        // is removed so the sender is not left waiting for a decision.
+        if(item->data(INCOMING_TRANSFER_PENDING_ROLE).toBool()) {
+            const std::uint64_t transferId =
+                item->data(INCOMING_TRANSFER_ID_ROLE).toULongLong();
+
+            // Keep the row visible if FileBridge cannot successfully send the rejection.
+            if(!transferManager_.rejectIncomingTransfer(transferId)) {
+                continue;
+            }
+        }
+        else if(!item->data(INCOMING_TRANSFER_REMOVABLE_ROLE).toBool()) {
+            // An accepted transfer that is still receiving must remain visible
+            // until its transfer lifecycle reaches a removable state.
             continue;
         }
+
         const int row = incomingFilesList_->row(item);
-        // takeItem() transfers ownership away from QListWidget, so delete the returned item.
+
+        // takeItem() transfers ownership away from QListWidget, so delete the
+        // returned item after removing it from the visible list.
         delete incomingFilesList_->takeItem(row);
     }
+
+    updateReceiveModeAttention();
+    updateIncomingDecisionControls();
     updateIncomingRemoveControl();
 }
 
+
 /**
  * updateIncomingRemoveControl()
- * Enables Remove Selected when at least one selected incoming transfer may be removed
+ * Enables Remove Selected when at least one selected incoming row can be removed
  */
 void MainWindow::updateIncomingRemoveControl() {
     bool hasRemovableSelection = false;
+
     const QList<QListWidgetItem *> selectedItems = incomingFilesList_->selectedItems();
+
     for(QListWidgetItem *item : selectedItems) {
-        if(item->data(INCOMING_TRANSFER_REMOVABLE_ROLE).toBool()) {
+        const bool isPending =
+            item->data(INCOMING_TRANSFER_PENDING_ROLE).toBool();
+
+        const bool isRemovable =
+            item->data(INCOMING_TRANSFER_REMOVABLE_ROLE).toBool();
+
+        // Pending rows can be removed by first rejecting them. Already-resolved
+        // removable rows can be deleted immediately from the visible history.
+        if(isPending || isRemovable) {
             hasRemovableSelection = true;
             break;
         }
     }
+
     removeSelectedIncomingButton_->setEnabled(hasRemovableSelection);
 }
 
 
 /**
  * updateIncomingDecisionControls()
- * Enables Accept Selected and Reject Selected when a pending incoming transfer is selected
+ * Enables Accept All and Reject All when at least one incoming transfer is still pending
  */
 void MainWindow::updateIncomingDecisionControls() {
-    bool hasPendingSelection = false;
-    const QList<QListWidgetItem *> selectedItems = incomingFilesList_->selectedItems();
-    for(QListWidgetItem *item : selectedItems) {
+    bool hasPendingTransfer = false;
+
+    // Accept All and Reject All operate on every pending row, so button
+    // availability depends on list contents rather than the current selection.
+    for(int index = 0; index < incomingFilesList_->count(); ++index) {
+        QListWidgetItem *item = incomingFilesList_->item(index);
+
         if(item->data(INCOMING_TRANSFER_PENDING_ROLE).toBool()) {
-            hasPendingSelection = true;
+            hasPendingTransfer = true;
             break;
         }
     }
-    acceptTransferButton_->setEnabled(hasPendingSelection);
-    rejectTransferButton_->setEnabled(hasPendingSelection);
+
+    acceptTransferButton_->setEnabled(hasPendingTransfer);
+    rejectTransferButton_->setEnabled(hasPendingTransfer);
 }
 
 

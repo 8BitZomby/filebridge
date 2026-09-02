@@ -116,16 +116,16 @@ class MainWindow : public QMainWindow {
         void handleIncomingTransferOffered(const TransferManager::IncomingTransfer& transfer);
 
         /**
-         * handleAcceptSelectedIncomingClicked()
+         * handleAcceptAllIncomingClicked()
          * Accepts the currently displayed incoming transfer
          */
-        void handleAcceptSelectedIncomingClicked();
+        void handleAcceptAllIncomingClicked();
 
         /**
-         * handleRejectSelectedIncomingClicked()
+         * handleRejectAllIncomingClicked()
          * Rejects the currently displayed incoming transfer
          */
-        void handleRejectSelectedIncomingClicked();
+        void handleRejectAllIncomingClicked();
 
         /**
          * handleRemoveSelectedIncomingClicked()
@@ -196,10 +196,10 @@ class MainWindow : public QMainWindow {
         void connectToNearbyDevice(QListWidgetItem *item);
 
         /**
-         * sendNextQueuedFile()
-         * Offers the first queued file and waits for its transfer to finish before continuing
+         * offerQueuedFiles()
+         * Sends file offers for every queued file that has not already been offered
          */
-        void sendNextQueuedFile();
+        void offerQueuedFiles();
 
         /**
          * updateOutgoingQueueControls()
@@ -236,6 +236,9 @@ class MainWindow : public QMainWindow {
 
         // Hidden QListWidgetItem data role containing an outgoing file's full local path
         static constexpr int OUTGOING_FILE_PATH_ROLE = Qt::UserRole;
+
+        // Hidden QListWidgetItem data role containing the protocol transfer ID assigned after an offer is sent
+        static constexpr int OUTGOING_TRANSFER_ID_ROLE = Qt::UserRole + 1;
 
         // Hidden QListWidgetItem data role containing an incoming file's transfer identifier
         static constexpr int INCOMING_TRANSFER_ID_ROLE = Qt::UserRole;

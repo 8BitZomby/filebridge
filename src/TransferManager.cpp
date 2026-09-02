@@ -28,40 +28,48 @@ TransferManager::TransferManager(ConnectionManager *connectionManager, QObject *
             this,                                            // Receiver: Transfer manager that owns transfer state.
             &TransferManager::handleFileOfferReceived        // Slot: records the incoming transfer.
         );
+
+        // Receive acceptance responses for outgoing file offers
+        QObject::connect(
+            connectionManager_,                                 // Sender: ConnectionManager that received the protocol message
+            &ConnectionManager::fileAcceptReceived,             // Signal: emmitted when a FileAccept message is received
+            this,                                               // Receiver: This TransferManager instance
+            &TransferManager::handleFileAcceptReceived          // Slot: (function pointer) -> when signal emits: 
+                                                                // handleFileAcceptReceived(connection, accept)
+        );
+
+        // Receive rejection resonses for outgoing file offers
+        QObject::connect(
+            connectionManager_,                                 // Sender: ConnectionManager that received the protocol message
+            &ConnectionManager::fileRejectReceived,             // Signal: Emitted when a FileReject message is received
+            this,                                               // Receiver: This TransferManager instance
+            &TransferManager::handleFileRejectReceived          // Slot: Handles the rejected outgoing transfer
+        );
+
+        // Receive file-data chunks for accepted incoming transfers
+        QObject::connect(
+            connectionManager_,                                 // Sender: ConnectionManager that received the protocol message
+            &ConnectionManager::fileDataReceived,               // Signal: Emitted when a valid FileData message is received
+            this,                                               // Receiver: This TransferManager instance
+            &TransferManager::handleFileDataReceived            // Slot: Validates and records the incoming chunk
+        );
+
+        // Received completion messages for incoming file transfers
+        QObject::connect(
+            connectionManager_,                                 // Sender: ConnectionManager that received the protocol message
+            &ConnectionManager::fileCompleteReceived,           // Signal: Emitted when a valid FileComplete message is received
+            this,                                               // Receiver: This TransferManager instance
+            &TransferManager::handleFileCompleteReceived        // Slot: Verifies and finalizes the incoming transfer
+        );
+
+        // Remove transfer state before ConnectionManager destroys a disconnected peer.
+        QObject::connect(
+            connectionManager_,                                 // Sender: ConnectionManager that owns peer connections.
+            &ConnectionManager::peerDisconnected,               // Signal: Emitted when a managed peer connection ends.
+            this,                                               // Receiver: This TransferManager instance.
+            &TransferManager::handlePeerDisconnected            // Slot: Removes transfers associated with that peer.
+        );
     }
-
-    // Receive acceptance responses for outgoing file offers
-    QObject::connect(
-        connectionManager_,                                 // Sender: ConnectionManager that received the protocol message
-        &ConnectionManager::fileAcceptReceived,             // Signal: emmitted when a FileAccept message is received
-        this,                                               // Receiver: This TransferManager instance
-        &TransferManager::handleFileAcceptReceived          // Slot: (function pointer) -> when signal emits: 
-                                                            // handleFileAcceptReceived(connection, accept)
-    );
-
-    // Receive rejection resonses for outgoing file offers
-    QObject::connect(
-        connectionManager_,                                 // Sender: ConnectionManager that received the protocol message
-        &ConnectionManager::fileRejectReceived,             // Signal: Emitted when a FileReject message is received
-        this,                                               // Receiver: This TransferManager instance
-        &TransferManager::handleFileRejectReceived          // Slot: Handles the rejected outgoing transfer
-    );
-
-    // Receive file-data chunks for accepted incoming transfers
-    QObject::connect(
-        connectionManager_,                                 // Sender: ConnectionManager that received the protocol message
-        &ConnectionManager::fileDataReceived,               // Signal: Emitted when a valid FileData message is received
-        this,                                               // Receiver: This TransferManager instance
-        &TransferManager::handleFileDataReceived            // Slot: Validates and records the incoming chunk
-    );
-
-    // Received completion messages for incoming file transfers
-    QObject::connect(
-        connectionManager_,                                 // Sender: ConnectionManager that received the protocol message
-        &ConnectionManager::fileCompleteReceived,           // Signal: Emitted when a valid FileComplete message is received
-        this,                                               // Receiver: This TransferManager instance
-        &TransferManager::handleFileCompleteReceived        // Slot: Verifies and finalizes the incoming transfer
-    );
 }
 
 
@@ -85,20 +93,20 @@ void TransferManager::setDownloadDirectory(const QString& directory) {
 
 /**
  * offerFile()
- * Creates and sends a new file-transfer offer to a ready peer
+ * Creates and sends a new file-transfer offer and returns its transfer ID on success
  */
-bool TransferManager::offerFile(PeerConnection *connection, const QString& filePath) {
-    // A transfer requires both a valid connection manager and a target peer
-    if(connectionManager_ == nullptr || connection  == nullptr) {
-        return false;
+std::optional<std::uint64_t> TransferManager::offerFile(PeerConnection *connection, const QString& filePath) {
+    // A transfer requires both a valid connection manager and a target peer.
+    if(connectionManager_ == nullptr || connection == nullptr) {
+        return std::nullopt;
     }
 
-    // Read filesystem metadata without leading the file contents into memory
+    // Read filesystem metadata without loading the file contents into memory.
     const QFileInfo fileInfo(filePath);
 
-    // Reject paths that do not refer to a readable regualr file
+    // Reject paths that do not refer to a readable regular file.
     if(!fileInfo.exists() || !fileInfo.isFile() || !fileInfo.isReadable()) {
-        return false;
+        return std::nullopt;
     }
 
     // Allocate an identifier that wwill associate later protocol messages with this file
@@ -113,7 +121,7 @@ bool TransferManager::offerFile(PeerConnection *connection, const QString& fileP
 
     // Send the offer before recording local transfer state so failed sends leave no stale entry
     if(!connectionManager_->sendFileOffer(connection, offer)) {
-        return false;
+        return std::nullopt;
     }
 
     // Remember the local file and peer so later transfer reponses can be matched correctly
@@ -133,7 +141,8 @@ bool TransferManager::offerFile(PeerConnection *connection, const QString& fileP
         static_cast<std::uint64_t>(fileInfo.size())
     );
 
-    return true;
+    // Return the exact identifier assigned to this successfully created transfer
+    return std::optional<std::uint64_t>(transferId);
 }
 
 
@@ -408,6 +417,34 @@ void TransferManager::handleFileCompleteReceived(PeerConnection *connection, con
 
     // The completed incoming transfer no longer needs to remain tracked
     incomingTransfers_.erase(transfer);
+}
+
+
+/**
+ * handlePeerDisconnected()
+ * Removes transfer state associated with a peer that is no longer connected
+ */
+void TransferManager::handlePeerDisconnected(PeerConnection *connection) {
+    // Erasing from std::unordered_map invalidates only the iterator for the
+    // erased element, and erase() returns the next valid iterator.
+    for(auto transfer = outgoingTransfers_.begin(); transfer != outgoingTransfers_.end();) {
+        if(transfer->second.connection == connection) {
+            transfer = outgoingTransfers_.erase(transfer);
+        }
+        else {
+            ++transfer;
+        }
+    }
+    // Incoming transfers also retain the disconnected PeerConnection pointer,
+    // so those entries must be removed before that peer object is destroyed.
+    for(auto transfer = incomingTransfers_.begin(); transfer != incomingTransfers_.end();) {
+        if(transfer->second.connection == connection) {
+            transfer = incomingTransfers_.erase(transfer);
+        }
+        else {
+            ++transfer;
+        }
+    }
 }
 
 
