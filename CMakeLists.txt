@@ -26,11 +26,15 @@ configure_file(
 # FileBridge uses Qt for its cross-platform GUI and networking.
 find_package(Qt6 REQUIRED COMPONENTS Widgets Network)
 
+# FileBridge uses OpenSSL's cryptographic library to create persistent peer identities.
+find_package(OpenSSL REQUIRED COMPONENTS Crypto)
+
 # Apply Qt's standard CMake setup, including automatic MOC/UIC handling.
 qt_standard_project_setup()
 
 # Create the FileBridge executable and list every source file that belongs to it.
 qt_add_executable(fb
+    include/ApplicationPaths.hpp
     include/ConnectionManager.hpp
     include/FileSizeFormatter.hpp
     include/TransferWidget.hpp
@@ -42,10 +46,11 @@ qt_add_executable(fb
     include/Protocol.hpp
     include/TcpListener.hpp
     include/TransferManager.hpp
-    src/main.cpp
+    src/ApplicationPaths.cpp
     src/ConnectionManager.cpp
     src/FileSizeFormatter.cpp
     src/TransferWidget.cpp
+    src/main.cpp
     src/MainWindow.cpp
     src/NetworkInfo.cpp
     src/PeerConnection.cpp
@@ -65,6 +70,7 @@ target_include_directories(fb PRIVATE
 target_link_libraries(fb PRIVATE
     Qt6::Widgets
     Qt6::Network
+    OpenSSL::Crypto
 )
 
 # Build a normal macOS application bundle without affecting Windows builds.
