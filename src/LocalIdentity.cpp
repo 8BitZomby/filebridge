@@ -1,0 +1,683 @@
+#include "LocalIdentity.hpp"
+#include "ApplicationPaths.hpp"
+
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
+#include <QSaveFile>
+#include <QList>
+#include <QSsl>
+
+#include <memory>
+#include <openssl/pem.h>
+#include <openssl/core_names.h>
+#include <openssl/params.h>
+#include <openssl/rand.h>
+#include <openssl/x509v3.h>
+#include <openssl/x509.h>
+
+
+namespace {
+
+    // Stores both the public certificate and private key in one PEM bundle so
+    // persistence can replace the complete FileBridge identity atomically.
+    const QString IDENTITY_FILE_NAME = QStringLiteral("identity.pem");
+
+    using EvpPkeyPtr = std::unique_ptr<EVP_PKEY, decltype(&EVP_PKEY_free)>;
+
+    /**
+     * generatePrivateKey()
+     * Generates the persistent P-256 private key used by a FileBridge identity.
+     */
+    EvpPkeyPtr generatePrivateKey(QString *errorMessage) {
+        // Create an OpenSSL key-generation context for elliptic-curve keys.
+        // The context owns the configuration used to generate the final EVP_PKEY.
+        std::unique_ptr<EVP_PKEY_CTX, decltype(&EVP_PKEY_CTX_free)> keyContext(
+            EVP_PKEY_CTX_new_from_name(nullptr, "EC", nullptr),
+            &EVP_PKEY_CTX_free
+        );
+
+        // Initialize the context specifically for key generation before setting curve parameters.
+        if(keyContext == nullptr || EVP_PKEY_keygen_init(keyContext.get()) <= 0) {
+            if(errorMessage != nullptr) {
+                *errorMessage = QStringLiteral("FileBridge could not initialize identity key generation.");
+            }
+
+            return EvpPkeyPtr(nullptr, &EVP_PKEY_free);
+        }
+
+        // prime256v1 is OpenSSL's name for the NIST P-256 curve, which is widely supported by TLS.
+        char curveName[] = "prime256v1";
+
+        // OpenSSL 3 configures provider-based key generation through OSSL_PARAM values.
+        // The group-name parameter tells the EC provider which named curve the new key must use.
+        OSSL_PARAM keyParameters[] = {
+            OSSL_PARAM_construct_utf8_string(
+                OSSL_PKEY_PARAM_GROUP_NAME,
+                curveName,
+                0
+            ),
+            OSSL_PARAM_construct_end()
+        };
+
+        // Apply the P-256 curve selection before requesting generation of the key pair.
+        if(EVP_PKEY_CTX_set_params(keyContext.get(), keyParameters) <= 0) {
+            if(errorMessage != nullptr) {
+                *errorMessage = QStringLiteral("FileBridge could not configure identity key generation.");
+            }
+
+            return EvpPkeyPtr(nullptr, &EVP_PKEY_free);
+        }
+
+        // OpenSSL allocates the generated key and transfers ownership through this raw pointer.
+        EVP_PKEY *generatedKey = nullptr;
+
+        // Generate both the private key and its corresponding public key in one EVP_PKEY object.
+        if(EVP_PKEY_generate(keyContext.get(), &generatedKey) <= 0 || generatedKey == nullptr) {
+            if(errorMessage != nullptr) {
+                *errorMessage = QStringLiteral("FileBridge could not generate its identity private key.");
+            }
+
+            return EvpPkeyPtr(nullptr, &EVP_PKEY_free);
+        }
+
+        // Wrap the OpenSSL allocation immediately so EVP_PKEY_free() is always called automatically.
+        return EvpPkeyPtr(generatedKey, &EVP_PKEY_free);
+    }
+
+    using X509Ptr = std::unique_ptr<X509, decltype(&X509_free)>;
+
+    /**
+     * generateCertificate()
+     * Creates and signs the self-signed TLS certificate for a FileBridge identity.
+     */
+    X509Ptr generateCertificate(EVP_PKEY *privateKey, QString *errorMessage) {
+        // Allocate a new X.509 certificate object and immediately give it automatic ownership.
+        X509Ptr certificate(X509_new(), &X509_free);
+
+        // OpenSSL numbers certificate versions from zero, so value 2 represents X.509 version 3.
+        // Version 3 is required because FileBridge uses standard certificate extensions below.
+        if(certificate == nullptr || X509_set_version(certificate.get(), 2) != 1) {
+            if(errorMessage != nullptr) {
+                *errorMessage = QStringLiteral("FileBridge could not create its identity certificate.");
+            }
+
+            return X509Ptr(nullptr, &X509_free);
+        }
+
+        // Generate an unpredictable 128-bit certificate serial number.
+        // The serial identifies this particular certificate and should not be reused predictably.
+        unsigned char serialBytes[16];
+
+        if(RAND_bytes(serialBytes, sizeof(serialBytes)) != 1) {
+            if(errorMessage != nullptr) {
+                *errorMessage = QStringLiteral("FileBridge could not generate a certificate serial number.");
+            }
+
+            return X509Ptr(nullptr, &X509_free);
+        }
+
+        // ASN.1 integers are signed, so clear the high bit to guarantee a positive serial value.
+        serialBytes[0] &= 0x7f;
+
+        // Convert the generated byte sequence into OpenSSL's arbitrary-precision integer type.
+        std::unique_ptr<BIGNUM, decltype(&BN_free)> serialNumber(
+            BN_bin2bn(serialBytes, sizeof(serialBytes), nullptr),
+            &BN_free
+        );
+
+        // Copy the generated serial number into the certificate's ASN.1 serial-number field.
+        if(serialNumber == nullptr ||
+            BN_to_ASN1_INTEGER(serialNumber.get(), X509_get_serialNumber(certificate.get())) == nullptr) {
+
+            if(errorMessage != nullptr) {
+                *errorMessage = QStringLiteral("FileBridge could not assign the certificate serial number.");
+            }
+
+            return X509Ptr(nullptr, &X509_free);
+        }
+
+        // Start validity five minutes in the past so small clock differences between peers do not
+        // cause an otherwise new certificate to appear not-yet-valid.
+        //
+        // Keep the certificate valid for ten years because FileBridge treats the public key as the
+        // persistent peer identity. The certificate is only the TLS wrapper around that identity.
+        if(X509_gmtime_adj(X509_getm_notBefore(certificate.get()), -300) == nullptr ||
+            X509_gmtime_adj(X509_getm_notAfter(certificate.get()), 315360000L) == nullptr) {
+
+            if(errorMessage != nullptr) {
+                *errorMessage = QStringLiteral("FileBridge could not set the identity certificate lifetime.");
+            }
+
+            return X509Ptr(nullptr, &X509_free);
+        }
+
+        // Embed the public half of FileBridge's persistent key pair into the certificate.
+        // Peers will later use this public key to identify the FileBridge installation.
+        if(X509_set_pubkey(certificate.get(), privateKey) != 1) {
+            if(errorMessage != nullptr) {
+                *errorMessage = QStringLiteral("FileBridge could not attach its public key to the certificate.");
+            }
+
+            return X509Ptr(nullptr, &X509_free);
+        }
+
+        // Obtain the mutable X.509 subject name that identifies the certificate holder.
+        X509_NAME *subjectName = X509_get_subject_name(certificate.get());
+
+        // Use a simple FileBridge common name because network addresses and device names are not
+        // trusted identity values. The issuer is set to the same name because this certificate is
+        // intentionally self-signed rather than issued by a public certificate authority.
+        if(subjectName == nullptr ||
+            X509_NAME_add_entry_by_txt(
+                subjectName,
+                "CN",
+                MBSTRING_ASC,
+                reinterpret_cast<const unsigned char *>("FileBridge"),
+                -1,
+                -1,
+                0
+            ) != 1 ||
+            X509_set_issuer_name(certificate.get(), subjectName) != 1) {
+
+            if(errorMessage != nullptr) {
+                *errorMessage = QStringLiteral("FileBridge could not create the identity certificate name.");
+            }
+
+            return X509Ptr(nullptr, &X509_free);
+        }
+
+        // Create the context OpenSSL uses while constructing X.509 version 3 extensions.
+        // The same certificate acts as both issuer and subject because FileBridge identities
+        // are self-signed.
+        X509V3_CTX extensionContext;
+        X509V3_set_ctx_nodb(&extensionContext);
+        X509V3_set_ctx(
+            &extensionContext,
+            certificate.get(),
+            certificate.get(),
+            nullptr,
+            nullptr,
+            0
+        );
+
+        // Build one extension from OpenSSL's textual configuration syntax and append it
+        // to the certificate. The temporary extension object is freed automatically afterward.
+        const auto addExtension = [&certificate, &extensionContext](int nid, const char *value) {
+            std::unique_ptr<X509_EXTENSION, decltype(&X509_EXTENSION_free)> extension(
+                X509V3_EXT_conf_nid(
+                    nullptr,
+                    &extensionContext,
+                    nid,
+                    const_cast<char *>(value)
+                ),
+                &X509_EXTENSION_free
+            );
+
+            return extension != nullptr &&
+                   X509_add_ext(certificate.get(), extension.get(), -1) == 1;
+        };
+
+        // CA:FALSE explicitly prevents the FileBridge certificate from acting as a certificate authority.
+        //
+        // digitalSignature permits the key to authenticate TLS handshakes, while keyAgreement supports
+        // the EC key's intended TLS usage.
+        //
+        // clientAuth and serverAuth are both required because either FileBridge peer may initiate or
+        // accept a connection; there is no permanent client/server role.
+        //
+        // subjectKeyIdentifier derives a standard identifier from the public key for certificate tooling.
+        if(!addExtension(NID_basic_constraints, "critical,CA:FALSE") ||
+            !addExtension(NID_key_usage, "critical,digitalSignature,keyAgreement") ||
+            !addExtension(NID_ext_key_usage, "clientAuth,serverAuth") ||
+            !addExtension(NID_subject_key_identifier, "hash")) {
+
+            if(errorMessage != nullptr) {
+                *errorMessage = QStringLiteral("FileBridge could not configure identity certificate extensions.");
+            }
+
+            return X509Ptr(nullptr, &X509_free);
+        }
+
+        // Self-sign the complete certificate with the matching private key using SHA-256.
+        // This proves possession of the private key but does not imply public-CA trust;
+        // FileBridge will establish trust separately using persistent peer identities.
+        if(X509_sign(certificate.get(), privateKey, EVP_sha256()) <= 0) {
+            if(errorMessage != nullptr) {
+                *errorMessage = QStringLiteral("FileBridge could not sign its identity certificate.");
+            }
+
+            return X509Ptr(nullptr, &X509_free);
+        }
+
+        // Return ownership of the complete certificate to the caller.
+        return certificate;
+    }
+
+
+    /**
+     * convertGeneratedIdentity()
+     * Converts generated OpenSSL identity objects into the Qt TLS types used by FileBridge.
+     */
+    bool convertGeneratedIdentity(
+        X509 *certificate,
+        EVP_PKEY *privateKey,
+        QSslCertificate& qtCertificate,
+        QSslKey& qtPrivateKey,
+        QString *errorMessage
+    ) {
+        // Create in-memory OpenSSL streams for the PEM-encoded certificate and private key.
+        // Using memory buffers avoids creating temporary files solely for conversion into Qt types.
+        std::unique_ptr<BIO, decltype(&BIO_free)> certificateBio(
+            BIO_new(BIO_s_mem()),
+            &BIO_free
+        );
+
+        std::unique_ptr<BIO, decltype(&BIO_free)> privateKeyBio(
+            BIO_new(BIO_s_mem()),
+            &BIO_free
+        );
+
+        // Encode both OpenSSL objects using the standard PEM representation understood by Qt.
+        // The private key remains unencrypted in memory; secure persistent storage is handled separately.
+        if(certificateBio == nullptr ||
+            privateKeyBio == nullptr ||
+            PEM_write_bio_X509(certificateBio.get(), certificate) != 1 ||
+            PEM_write_bio_PrivateKey(
+                privateKeyBio.get(),
+                privateKey,
+                nullptr,
+                nullptr,
+                0,
+                nullptr,
+                nullptr
+            ) != 1) {
+
+            if(errorMessage != nullptr) {
+                *errorMessage = QStringLiteral("FileBridge could not encode its generated identity.");
+            }
+
+            return false;
+        }
+
+        // Obtain the OpenSSL-owned memory containing each encoded PEM object.
+        BUF_MEM *certificateBuffer = nullptr;
+        BUF_MEM *privateKeyBuffer = nullptr;
+
+        BIO_get_mem_ptr(certificateBio.get(), &certificateBuffer);
+        BIO_get_mem_ptr(privateKeyBio.get(), &privateKeyBuffer);
+
+        // Both buffers must be available before their contents can safely be copied into Qt containers.
+        if(certificateBuffer == nullptr || privateKeyBuffer == nullptr) {
+            if(errorMessage != nullptr) {
+                *errorMessage = QStringLiteral("FileBridge could not read its generated identity.");
+            }
+
+            return false;
+        }
+
+        // Copy the encoded data while the BIO objects still own and keep their backing memory alive.
+        const QByteArray certificateData(
+            certificateBuffer->data,
+            static_cast<qsizetype>(certificateBuffer->length)
+        );
+
+        const QByteArray privateKeyData(
+            privateKeyBuffer->data,
+            static_cast<qsizetype>(privateKeyBuffer->length)
+        );
+
+        // Parse the generated certificate through Qt so QSslSocket can use it later during TLS setup.
+        const QList<QSslCertificate> certificates =
+            QSslCertificate::fromData(certificateData, QSsl::Pem);
+
+        // Parse the corresponding EC private key into Qt's TLS key representation.
+        const QSslKey parsedPrivateKey(
+            privateKeyData,
+            QSsl::Ec,
+            QSsl::Pem,
+            QSsl::PrivateKey
+        );
+
+        // FileBridge expects exactly one identity certificate and one valid EC private key.
+        if(certificates.size() != 1 || parsedPrivateKey.isNull()) {
+            if(errorMessage != nullptr) {
+                *errorMessage = QStringLiteral("Qt could not load the generated FileBridge identity.");
+            }
+
+            return false;
+        }
+
+        // Return the converted Qt objects only after both have been successfully parsed.
+        qtCertificate = certificates.first();
+        qtPrivateKey = parsedPrivateKey;
+
+        return true;
+    }
+}
+
+
+/**
+ * load()
+ * Loads the existing persistent certificate and private key without creating a new identity.
+ */
+LocalIdentity::LoadResult LocalIdentity::load(QString *errorMessage) {
+    // Clear any identity already held in memory before attempting a fresh load.
+    // This prevents stale credentials from remaining usable if a later load attempt fails.
+    certificate_ = QSslCertificate();
+    privateKey_ = QSslKey();
+
+    // Resolve the single PEM bundle that stores this FileBridge installation's
+    // certificate and private key together.
+    const QDir identityDirectory(ApplicationPaths::identityDirectory());
+    const QString identityPath = identityDirectory.filePath(IDENTITY_FILE_NAME);
+
+    // A missing bundle is the normal state before FileBridge creates its identity
+    // for the first time.
+    if(!QFileInfo::exists(identityPath)) {
+        return LoadResult::NotFound;
+    }
+
+    // Open the complete identity bundle once so the exact same persisted data is
+    // inspected by both Qt and OpenSSL.
+    QFile identityFile(identityPath);
+
+    if(!identityFile.open(QIODevice::ReadOnly)) {
+        if(errorMessage != nullptr) {
+            *errorMessage = QStringLiteral("The persistent FileBridge identity could not be opened.");
+        }
+
+        return LoadResult::Failed;
+    }
+
+    // Keep the PEM data in memory while the certificate, private key, and their
+    // relationship are independently validated.
+    const QByteArray identityData = identityFile.readAll();
+
+    // Parse the public certificate through Qt because this is the representation
+    // that FileBridge's QSslSocket-based transport will eventually use.
+    const QList<QSslCertificate> certificates =
+        QSslCertificate::fromData(identityData, QSsl::Pem);
+
+    // FileBridge stores exactly one self-signed identity certificate in the bundle.
+    if(certificates.size() != 1) {
+        if(errorMessage != nullptr) {
+            *errorMessage = QStringLiteral("The FileBridge identity certificate is invalid.");
+        }
+
+        return LoadResult::Failed;
+    }
+
+    // Qt scans the same PEM bundle for the EC private key while ignoring the
+    // certificate block that precedes it.
+    const QSslKey privateKey(
+        identityData,
+        QSsl::Ec,
+        QSsl::Pem,
+        QSsl::PrivateKey
+    );
+
+    if(privateKey.isNull()) {
+        if(errorMessage != nullptr) {
+            *errorMessage = QStringLiteral("The FileBridge private key is invalid.");
+        }
+
+        return LoadResult::Failed;
+    }
+
+    // Create two independent in-memory OpenSSL streams over the same bundle because
+    // each PEM parser advances its stream while locating the object it reads.
+    std::unique_ptr<BIO, decltype(&BIO_free)> certificateBio(
+        BIO_new_mem_buf(identityData.constData(), static_cast<int>(identityData.size())),
+        &BIO_free
+    );
+
+    std::unique_ptr<BIO, decltype(&BIO_free)> privateKeyBio(
+        BIO_new_mem_buf(identityData.constData(), static_cast<int>(identityData.size())),
+        &BIO_free
+    );
+
+    // Pair validation cannot continue unless both OpenSSL streams were created.
+    if(certificateBio == nullptr || privateKeyBio == nullptr) {
+        if(errorMessage != nullptr) {
+            *errorMessage = QStringLiteral("The persistent FileBridge identity could not be validated.");
+        }
+
+        return LoadResult::Failed;
+    }
+
+    // Parse the certificate and private key into OpenSSL objects specifically so
+    // their cryptographic relationship can be checked independently of Qt.
+    std::unique_ptr<X509, decltype(&X509_free)> opensslCertificate(
+        PEM_read_bio_X509(certificateBio.get(), nullptr, nullptr, nullptr),
+        &X509_free
+    );
+
+    std::unique_ptr<EVP_PKEY, decltype(&EVP_PKEY_free)> opensslPrivateKey(
+        PEM_read_bio_PrivateKey(privateKeyBio.get(), nullptr, nullptr, nullptr),
+        &EVP_PKEY_free
+    );
+
+    if(opensslCertificate == nullptr || opensslPrivateKey == nullptr) {
+        if(errorMessage != nullptr) {
+            *errorMessage = QStringLiteral("The persistent FileBridge identity could not be validated.");
+        }
+
+        return LoadResult::Failed;
+    }
+
+    // Two individually valid PEM objects are not enough: the certificate must
+    // contain the public key corresponding to this exact private key.
+    if(X509_check_private_key(opensslCertificate.get(), opensslPrivateKey.get()) != 1) {
+        if(errorMessage != nullptr) {
+            *errorMessage = QStringLiteral("The FileBridge certificate and private key do not match.");
+        }
+
+        return LoadResult::Failed;
+    }
+
+    // Commit the identity to LocalIdentity only after every parsing and pair
+    // validation step succeeds.
+    certificate_ = certificates.first();
+    privateKey_ = privateKey;
+
+    return LoadResult::Loaded;
+}
+
+
+/**
+ * generate()
+ * Creates a new in-memory FileBridge identity without persisting it.
+ */
+bool LocalIdentity::generate(QString *errorMessage) {
+    // Clear any identity already held in memory before beginning generation.
+    // This prevents an older identity from remaining active if generation fails partway through.
+    certificate_ = QSslCertificate();
+    privateKey_ = QSslKey();
+
+    // Generate the persistent P-256 key pair that defines this FileBridge installation's identity.
+    EvpPkeyPtr privateKey = generatePrivateKey(errorMessage);
+
+    if(privateKey == nullptr) {
+        return false;
+    }
+
+    // Build a self-signed X.509 certificate containing the public half of the generated key pair.
+    X509Ptr certificate = generateCertificate(privateKey.get(), errorMessage);
+
+    if(certificate == nullptr) {
+        return false;
+    }
+
+    // Verify at the OpenSSL level that the certificate actually contains the public key
+    // corresponding to the private key before converting either object into Qt types.
+    if(X509_check_private_key(certificate.get(), privateKey.get()) != 1) {
+        if(errorMessage != nullptr) {
+            *errorMessage = QStringLiteral("The generated FileBridge identity failed key validation.");
+        }
+
+        return false;
+    }
+
+    // Convert the validated OpenSSL identity into the QSslCertificate and QSslKey
+    // representations that FileBridge's Qt networking layer will use.
+    QSslCertificate qtCertificate;
+    QSslKey qtPrivateKey;
+
+    if(!convertGeneratedIdentity(
+        certificate.get(),
+        privateKey.get(),
+        qtCertificate,
+        qtPrivateKey,
+        errorMessage
+    )) {
+        return false;
+    }
+
+    // Commit the fully generated, validated, and converted identity only after every step succeeds.
+    certificate_ = qtCertificate;
+    privateKey_ = qtPrivateKey;
+
+    return true;
+}
+
+
+/**
+ * persist()
+ * Atomically stores the currently loaded FileBridge identity in persistent application data.
+ */
+bool LocalIdentity::persist(QString *errorMessage) {
+    // Refuse to create an identity file unless both the certificate and private key
+    // have already been generated or loaded successfully.
+    if(!isLoaded()) {
+        if(errorMessage != nullptr) {
+            *errorMessage = QStringLiteral("FileBridge has no valid identity to persist.");
+        }
+
+        return false;
+    }
+
+    // Ensure the application-owned identity directory exists before creating the bundle.
+    // QDir::mkpath() creates any missing parent directories without requiring
+    // platform-specific filesystem paths.
+    QDir identityDirectory(ApplicationPaths::identityDirectory());
+
+    if(!identityDirectory.exists() && !identityDirectory.mkpath(QStringLiteral("."))) {
+        if(errorMessage != nullptr) {
+            *errorMessage = QStringLiteral("FileBridge could not create its identity directory.");
+        }
+
+        return false;
+    }
+
+    // Encode the public certificate and private key into one PEM document.
+    // Keeping both objects in a single file allows QSaveFile to replace the entire
+    // identity atomically rather than committing two independent security files.
+    QByteArray identityData = certificate_.toPem();
+
+    if(identityData.isEmpty()) {
+        if(errorMessage != nullptr) {
+            *errorMessage = QStringLiteral("FileBridge could not encode its identity certificate.");
+        }
+
+        return false;
+    }
+
+    const QByteArray privateKeyData = privateKey_.toPem();
+
+    if(privateKeyData.isEmpty()) {
+        if(errorMessage != nullptr) {
+            *errorMessage = QStringLiteral("FileBridge could not encode its identity private key.");
+        }
+
+        return false;
+    }
+
+    // Separate the two PEM objects with a newline so the bundle remains readable
+    // by standard PEM parsers regardless of the exact trailing newline produced by Qt.
+    if(!identityData.endsWith('\n')) {
+        identityData.append('\n');
+    }
+
+    identityData.append(privateKeyData);
+
+    // QSaveFile writes to a temporary file in the destination directory and only
+    // replaces the final identity bundle when commit() succeeds. A crash or failed
+    // write therefore cannot leave a partially written persistent identity behind.
+    const QString identityPath = identityDirectory.filePath(IDENTITY_FILE_NAME);
+    QSaveFile identityFile(identityPath);
+
+    if(!identityFile.open(QIODevice::WriteOnly)) {
+        if(errorMessage != nullptr) {
+            *errorMessage = QStringLiteral("FileBridge could not open its identity file for writing.");
+        }
+
+        return false;
+    }
+
+    // The bundle contains the private key, so restrict access to the current
+    // operating-system user before any identity bytes are committed.
+    const QFileDevice::Permissions privatePermissions =
+        QFileDevice::ReadOwner |
+        QFileDevice::WriteOwner;
+
+    if(!identityFile.setPermissions(privatePermissions)) {
+        identityFile.cancelWriting();
+
+        if(errorMessage != nullptr) {
+            *errorMessage = QStringLiteral("FileBridge could not secure its identity file permissions.");
+        }
+
+        return false;
+    }
+
+    // Require the complete PEM bundle to be accepted by QSaveFile rather than
+    // treating a short write as a successful identity save.
+    if(identityFile.write(identityData) != identityData.size()) {
+        identityFile.cancelWriting();
+
+        if(errorMessage != nullptr) {
+            *errorMessage = QStringLiteral("FileBridge could not write its complete persistent identity.");
+        }
+
+        return false;
+    }
+
+    // Atomically replace the destination only after every byte has been written.
+    if(!identityFile.commit()) {
+        if(errorMessage != nullptr) {
+            *errorMessage = QStringLiteral("FileBridge could not commit its persistent identity.");
+        }
+
+        return false;
+    }
+
+    return true;
+}
+
+
+/**
+ * isLoaded()
+ * Returns whether a valid certificate and private key are currently loaded.
+ */
+bool LocalIdentity::isLoaded() const {
+    return !certificate_.isNull() && !privateKey_.isNull();
+}
+
+
+/**
+ * certificate()
+ * Returns the certificate associated with this FileBridge installation.
+ */
+const QSslCertificate& LocalIdentity::certificate() const {
+    return certificate_;
+}
+
+
+/**
+ * privateKey()
+ * Returns the private key associated with this FileBridge installation.
+ */
+const QSslKey& LocalIdentity::privateKey() const {
+    return privateKey_;
+}

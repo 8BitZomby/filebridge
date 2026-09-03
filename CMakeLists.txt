@@ -27,7 +27,7 @@ configure_file(
 find_package(Qt6 REQUIRED COMPONENTS Widgets Network)
 
 # FileBridge uses OpenSSL's cryptographic library to create persistent peer identities.
-find_package(OpenSSL REQUIRED COMPONENTS Crypto)
+find_package(OpenSSL 3.0 REQUIRED COMPONENTS Crypto)
 
 # Apply Qt's standard CMake setup, including automatic MOC/UIC handling.
 qt_standard_project_setup()
@@ -38,6 +38,7 @@ qt_add_executable(fb
     include/ConnectionManager.hpp
     include/FileSizeFormatter.hpp
     include/TransferWidget.hpp
+    include/LocalIdentity.hpp
     include/MainWindow.hpp
     include/NetworkInfo.hpp
     include/PeerConnection.hpp
@@ -50,6 +51,7 @@ qt_add_executable(fb
     src/ConnectionManager.cpp
     src/FileSizeFormatter.cpp
     src/TransferWidget.cpp
+    src/LocalIdentity.cpp
     src/main.cpp
     src/MainWindow.cpp
     src/NetworkInfo.cpp
