@@ -4,10 +4,12 @@
 #include "ConnectionManager.hpp"
 #include "Protocol.hpp"
 
+#include <QFile>
 #include <QObject>
 #include <QString>
 
 #include <cstdint>
+#include <deque>
 #include <optional>
 #include <unordered_map>
 
@@ -109,6 +111,12 @@ class TransferManager : public QObject {
         void outgoingTransferRejected(std::uint64_t transferId);
 
         /**
+         * outgoingTransferFailed()
+         * Reports that an outgoing transfer failed after it had already begun.
+         */
+        void outgoingTransferFailed(std::uint64_t transferId, const QString& errorMessage);
+
+        /**
          * outgoingTransferCompleted()
          * Reports that an outgoing transfer finished sending all file data
          */
@@ -119,6 +127,30 @@ class TransferManager : public QObject {
          * Reports that an incoming transfer finished receiving all expected file data
          */
         void incomingTransferCompleted(std::uint64_t transferId);
+
+        /**
+         * incomingTransferFailed()
+         * Reports that an incoming transfer could not continue because of a local failure
+         */
+        void incomingTransferFailed(std::uint64_t transferId, const QString& errorMessage);
+
+        /**
+         * outgoingTransferProgress()
+         * Reports updated byte progress for an outgoing file transfer
+         */
+        void outgoingTransferProgress(std::uint64_t transferId, std::uint64_t bytesSent, std::uint64_t fileSize);
+
+        /**
+         * incomingTransferProgress()
+         * Reports updated byte progress for an incoming file transfer
+         */
+        void incomingTransferProgress(std::uint64_t transferId, std::uint64_t bytesReceived, std::uint64_t fileSize);
+
+        /**
+         * outgoingTransferSent()
+         * Reports that all outgoing file data and the completion message were queued successfully
+         */
+        void outgoingTransferSent(std::uint64_t transferId);
 
     private slots:
 
@@ -153,6 +185,24 @@ class TransferManager : public QObject {
         void handleFileCompleteReceived(PeerConnection *connection, const Protocol::FileCompletePayload& complete);
 
         /**
+         * handleFileCompleteAckReceived()
+         * Finalizes an outgoing transfer after the receiver confirms successful completion
+         */
+        void handleFileCompleteAckReceived(PeerConnection *connection, const Protocol::FileCompleteAckPayload& completeAck);
+
+        /**
+         * handleErrorReceived()
+         * Stops an outgoing transfer after the remote peer reports a transfer failure.
+         */
+        void handleErrorReceived(PeerConnection *connection, const Protocol::ErrorPayload& error);
+
+        /**
+         * handlePeerBytesWritten()
+         * Continues outgoing transfers when queued socket bytes are written
+         */
+        void handlePeerBytesWritten(PeerConnection *connection, qint64 bytes);
+
+        /**
          * handlePeerDisconnected()
          * Removes transfer state associated with a peer that is no longer connected
          */
@@ -173,13 +223,40 @@ class TransferManager : public QObject {
 
             // Peer that accepted and will receive this outgoing transfer
             PeerConnection *connection;
+
+            // Open source file retained while asynchronous chunks are being transmitted
+            QFile *file;
+
+            // Total number of file bytes expected to be sent
+            std::uint64_t fileSize;
+
+            // Byte offset of the next file chunk that should be sent
+            std::uint64_t bytesSent;
         };
 
         /**
          * sendFileContents()
          * Reads one accepted local file in chunks and sends each chunk to the peer
          */
-        bool sendFileContents(const OutgoingTransfer& transfer);
+        bool sendFileContents(OutgoingTransfer& transfer);
+
+        /**
+         * failIncomingTransfer()
+         * Reports a local incoming-transfer failure to both the remote peer and the GUI
+         */
+        void failIncomingTransfer(std::uint64_t transferId, Protocol::TransferErrorCode errorCode, const QString& errorMessage);
+
+        /**
+         * startNextQueuedOutgoingTransfer()
+         * Starts the next accepted outgoing transfer waiting for the specified peer
+         */
+        void startNextQueuedOutgoingTransfer(PeerConnection *connection);
+
+        /**
+         * sendNextOutgoingChunk()
+         * Sends the next chunk of an active outgoing transfer and returns control to Qt
+         */
+        bool sendNextOutgoingChunk(OutgoingTransfer& transfer);
 
         /**
          * createUniqueDestinationPath()
@@ -205,6 +282,12 @@ class TransferManager : public QObject {
 
         // Tracks pending outgoing transfers by their unique transfer identifier
         std::unordered_map<std::uint64_t, OutgoingTransfer> outgoingTransfers_;
+
+        // Tracks the one outgoing transfer currently transmitting for each peer
+        std::unordered_map<PeerConnection *, std::uint64_t> activeOutgoingTransfers_;
+
+        // Holds accepted outgoing transfers waiting for the current transfer to finish
+        std::unordered_map<PeerConnection *, std::deque<std::uint64_t>> queuedOutgoingTransfers_;
 
         // Tracks pending incoming transfers by their sender-assigned transfer identifier.
         std::unordered_map<std::uint64_t, IncomingTransfer> incomingTransfers_;

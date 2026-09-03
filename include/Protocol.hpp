@@ -11,7 +11,7 @@
 namespace Protocol {
 
     // Current FileBridge protocol version used to detect incompatible peers
-    constexpr std::uint16_t VERSION = 2;
+    constexpr std::uint16_t VERSION = 4;
 
     // Maximum payload size allowed for any single protocol message
     constexpr std::uint64_t MAX_PAYLOAD_SIZE = 64ULL * 1024ULL * 1024ULL;
@@ -29,9 +29,10 @@ namespace Protocol {
         FileReject = 4,
         FileData = 5,
         FileComplete = 6,
-        Error = 7,
-        ConnectionAccept = 8,
-        ConnectionReject = 9
+        FileCompleteAck = 7,
+        Error = 8,
+        ConnectionAccept = 9,
+        ConnectionReject = 10
     };
 
     /**
@@ -128,6 +129,42 @@ namespace Protocol {
     struct FileCompletePayload {
         // Identifies the transfer that has finished sending file data
         std::uint64_t transferId;
+    };
+
+    /**
+     * FileCompleteAckPayload
+     * Identifies a file transfer the receiver has fully received and finalized
+     */
+    struct FileCompleteAckPayload {
+        // Identifies the transfer that was successfully completed by the receiver
+        std::uint64_t transferId;
+    };
+
+    /**
+     * TransferErrorCode
+     * Identifies the general reason an active file transfer could not continue
+     */
+    enum class TransferErrorCode : std::uint8_t {
+        Unknown = 0,
+        FileOpenFailed = 1,
+        FileSeekFailed = 2,
+        FileWriteFailed = 3,
+        IncompleteTransfer = 4
+    };
+
+    /**
+     * ErrorPayload
+     * Reports a transfer-specific failure to the peer that owns the matching transfer
+     */
+    struct ErrorPayload {
+        // Identifies the transfer that can no longer continue
+        std::uint64_t transferId;
+
+        // Machine-readable failure category used by transfer-management logic
+        TransferErrorCode errorCode;
+
+        // Human-readable explanation suitable for diagnostics and later UI reporting
+        QString message;
     };
 
     /**
@@ -229,6 +266,30 @@ namespace Protocol {
     bool deserializeFileCompletePayload(const QByteArray& data, FileCompletePayload& complete);
 
     /**
+     * serializeFileCompleteAckPayload()
+     * Encodes a completed-transfer acknowledgement into its binary payload bytes
+     */
+    QByteArray serializeFileCompleteAckPayload(const FileCompleteAckPayload& completeAck);
+
+    /**
+     * deserializeFileCompleteAckPayload()
+     * Decodes a completed-transfer acknowledgement from binary payload bytes
+     */
+    bool deserializeFileCompleteAckPayload(const QByteArray& data, FileCompleteAckPayload& completeAck);
+
+    /**
+     * serializeErrorPayload()
+     * Encodes a transfer-specific failure into its binary payload bytes
+     */
+    QByteArray serializeErrorPayload(const ErrorPayload& error);
+
+    /**
+     * deserializeErrorPayload()
+     * Decodes a transfer-specific failure from binary payload bytes
+     */
+    bool deserializeErrorPayload(const QByteArray& data, ErrorPayload& error);
+
+    /**
      * makeFileOfferMessage()
      * Builds a complete FileOffer message from structured file metadata
      */
@@ -257,6 +318,18 @@ namespace Protocol {
      * Builds a complete FileComplete message for a finished transfer
      */
     Message makeFileCompleteMessage(const FileCompletePayload& complete);
+
+    /**
+     * makeFileCompleteAckMessage()
+     * Builds a FileCompleteAck message for a transfer finalized by the receiver
+     */
+    Message makeFileCompleteAckMessage(const FileCompleteAckPayload& completeAck);
+
+    /**
+     * makeErrorMessage()
+     * Builds an Error message reporting that a specific file transfer failed
+     */
+    Message makeErrorMessage(const ErrorPayload& error);
 
     /**
      * makeConnectionAcceptMessage()

@@ -89,6 +89,7 @@ bool Protocol::isValidMessageType(std::uint8_t type) {
         case MessageType::FileReject:
         case MessageType::FileData:
         case MessageType::FileComplete:
+        case MessageType::FileCompleteAck:
         case MessageType::Error:
         case MessageType::ConnectionAccept:
         case MessageType::ConnectionReject:
@@ -425,6 +426,129 @@ bool Protocol::deserializeFileCompletePayload(const QByteArray &data, FileComple
 
 
 /**
+ * serializeFileCompleteAckPayload()
+ * Encodes a completed-transfer acknowledgement into its binary payload bytes
+ */
+QByteArray Protocol::serializeFileCompleteAckPayload(const FileCompleteAckPayload& completeAck) {
+    QByteArray data;
+    QDataStream stream(&data, QIODevice::WriteOnly);
+
+    // Use the same byte order as the rest of the FileBridge protocol.
+    stream.setByteOrder(QDataStream::BigEndian);
+
+    // Pin Qt's serialization format so different Qt 6 releases remain compatible.
+    stream.setVersion(QDataStream::Qt_6_0);
+
+    // The acknowledgement only needs to identify the completed transfer.
+    stream << completeAck.transferId;
+
+    return data;
+}
+
+
+/**
+ * deserializeFileCompleteAckPayload()
+ * Decodes a completed-transfer acknowledgement from binary payload bytes
+ */
+bool Protocol::deserializeFileCompleteAckPayload(
+    const QByteArray& data,
+    FileCompleteAckPayload& completeAck
+) {
+    QDataStream stream(data);
+
+    // Match the byte order used when serializing the acknowledgement payload.
+    stream.setByteOrder(QDataStream::BigEndian);
+
+    // Use the same fixed serialization format used when the payload was written.
+    stream.setVersion(QDataStream::Qt_6_0);
+
+    std::uint64_t transferId = 0;
+
+    // Recover the sender-assigned transfer identifier.
+    stream >> transferId;
+
+    if(stream.status() != QDataStream::Ok) {
+        return false;
+    }
+
+    completeAck.transferId = transferId;
+
+    return true;
+}
+
+
+/**
+ * serializeErrorPayload()
+ * Encodes a transfer-specific failure into its binary payload bytes
+ */
+QByteArray Protocol::serializeErrorPayload(const ErrorPayload& error) {
+    QByteArray data;
+    QDataStream stream(&data, QIODevice::WriteOnly);
+
+    // Use the same byte order as every other FileBridge protocol payload.
+    stream.setByteOrder(QDataStream::BigEndian);
+
+    // Pin Qt's serialization format so different Qt 6 releases remain compatible.
+    stream.setVersion(QDataStream::Qt_6_0);
+
+    // Preserve a fixed field order so the receiving peer can reconstruct the failure.
+    stream << error.transferId;
+    stream << static_cast<std::uint8_t>(error.errorCode);
+    stream << error.message;
+
+    return data;
+}
+
+
+/**
+ * deserializeErrorPayload()
+ * Decodes a transfer-specific failure from binary payload bytes
+ */
+bool Protocol::deserializeErrorPayload(const QByteArray& data, ErrorPayload& error) {
+    QDataStream stream(data);
+
+    // Match the byte order used when serializing Error payloads.
+    stream.setByteOrder(QDataStream::BigEndian);
+
+    // Use the same fixed serialization format used when the payload was written.
+    stream.setVersion(QDataStream::Qt_6_0);
+
+    std::uint64_t transferId = 0;
+    std::uint8_t rawErrorCode = 0;
+    QString message;
+
+    stream >> transferId;
+    stream >> rawErrorCode;
+    stream >> message;
+
+    if(stream.status() != QDataStream::Ok) {
+        return false;
+    }
+
+    const TransferErrorCode errorCode =
+        static_cast<TransferErrorCode>(rawErrorCode);
+
+    switch(errorCode) {
+        case TransferErrorCode::Unknown:
+        case TransferErrorCode::FileOpenFailed:
+        case TransferErrorCode::FileSeekFailed:
+        case TransferErrorCode::FileWriteFailed:
+        case TransferErrorCode::IncompleteTransfer:
+            break;
+
+        default:
+            return false;
+    }
+
+    error.transferId = transferId;
+    error.errorCode = errorCode;
+    error.message = message;
+
+    return true;
+}
+
+
+/**
  * makeFileDataMessage()
  * Builds a complete FileData message from one file-data chunk
  */
@@ -463,6 +587,43 @@ Protocol::Message Protocol::makeFileCompleteMessage(const FileCompletePayload &c
     return {
         {
             MessageType::FileComplete,
+            static_cast<std::uint64_t>(payload.size())
+        },
+        payload
+    };
+}
+
+
+/**
+ * makeFileCompleteAckMessage()
+ * Builds a FileCompleteAck message for a transfer finalized by the receiver
+ */
+Protocol::Message Protocol::makeFileCompleteAckMessage(
+    const FileCompleteAckPayload& completeAck
+) {
+    // Encode the acknowledgement-specific transfer identifier into payload bytes.
+    const QByteArray payload = serializeFileCompleteAckPayload(completeAck);
+
+    return {
+        {
+            MessageType::FileCompleteAck,
+            static_cast<std::uint64_t>(payload.size())
+        },
+        payload
+    };
+}
+
+
+/**
+ * makeErrorMessage()
+ * Builds an Error message reporting that a specific file transfer failed
+ */
+Protocol::Message Protocol::makeErrorMessage(const ErrorPayload& error) {
+    const QByteArray payload = serializeErrorPayload(error);
+
+    return Message {
+        MessageHeader {
+            MessageType::Error,
             static_cast<std::uint64_t>(payload.size())
         },
         payload

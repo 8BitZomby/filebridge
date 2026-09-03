@@ -152,16 +152,46 @@ class MainWindow : public QMainWindow {
         void handleSendFilesClicked();
 
         /**
+         * handleOutgoingTransferFailed()
+         * Marks an outgoing transfer as failed and keeps its history row visible
+         */
+        void handleOutgoingTransferFailed(std::uint64_t transferId, const QString& errorMessage);
+
+        /**
          * handleOutgoingTransferCompleted()
          * Displays that an outgoing file transfer finished successfully
          */
         void handleOutgoingTransferCompleted(std::uint64_t transferId);
 
         /**
+         * handleIncomingTransferFailed()
+         * Marks an incoming transfer as failed and allows its history row to be removed
+         */
+        void handleIncomingTransferFailed(std::uint64_t transferId, const QString& errorMessage);
+
+        /**
          * handleIncomingTransferCompleted()
          * Displays that an incoming file transfer finished successfully
          */
         void handleIncomingTransferCompleted(std::uint64_t transferId);
+
+        /**
+         * handleOutgoingTransferSent()
+         * Marks the matching outgoing transfer as sent while awaiting receiver confirmation
+         */
+        void handleOutgoingTransferSent(std::uint64_t transferId);
+
+        /**
+         * handleIncomingTransferProgress()
+         * Updates the visible progress for an incoming file transfer
+         */
+        void handleIncomingTransferProgress(std::uint64_t transferId, std::uint64_t bytesReceived, std::uint64_t fileSize);
+
+        /**
+         * handleOutgoingTransferProgress()
+         * Updates the matching outgoing transfer row as additional file data is sent
+         */
+        void handleOutgoingTransferProgress(std::uint64_t transferId, std::uint64_t bytesSent, std::uint64_t fileSize);
 
         /**
          * handleConnectionFailed()
@@ -208,6 +238,12 @@ class MainWindow : public QMainWindow {
         void updateOutgoingQueueControls();
 
         /**
+         * updateOutgoingTransferDisplay()
+         * Updates one outgoing transfer row to match its current state and progress
+         */
+        void updateOutgoingTransferDisplay(QListWidgetItem *item);
+
+        /**
          * updateReceiveModeAttention()
          * Updates the Receive selector text and attention styling from pending incoming offers
          */
@@ -225,6 +261,12 @@ class MainWindow : public QMainWindow {
          */
         void updateIncomingDecisionControls();
 
+        /**
+         * updateIncomingTransferDisplay()
+         * Rebuilds one incoming-transfer row from its stored metadata and lifecycle state
+         */
+        void updateIncomingTransferDisplay(QListWidgetItem *item);
+
         // Hidden QListWidgetItem data role containing the peer's unique running-instance ID
         static constexpr int NEARBY_DEVICE_INSTANCE_ID_ROLE = Qt::UserRole;
 
@@ -240,6 +282,31 @@ class MainWindow : public QMainWindow {
         // Hidden QListWidgetItem data role containing the protocol transfer ID assigned after an offer is sent
         static constexpr int OUTGOING_TRANSFER_ID_ROLE = Qt::UserRole + 1;
 
+        /**
+         * OutgoingTransferState
+         * Represents the lifecycle state displayed for one outgoing transfer
+         */
+        enum class OutgoingTransferState : int {
+            Pending = 0,
+            Waiting = 1,
+            Sending = 2,
+            Sent = 3,
+            Completed = 4,
+            Rejected = 5,
+            Failed = 6
+        };
+
+        // Hidden QListWidgetItem data role containing the outgoing transfer's current display state
+        static constexpr int OUTGOING_TRANSFER_STATE_ROLE = Qt::UserRole + 2;
+
+        static constexpr int OUTGOING_FILE_NAME_ROLE = Qt::UserRole + 3;
+
+        // Hidden QListWidgetItem data role containing the outgoing file's total size in bytes
+        static constexpr int OUTGOING_FILE_SIZE_ROLE = Qt::UserRole + 4;
+
+        // Hidden QListWidgetItem data role containing the number of bytes sent so far
+        static constexpr int OUTGOING_BYTES_SENT_ROLE = Qt::UserRole + 5;
+
         // Hidden QListWidgetItem data role containing an incoming file's transfer identifier
         static constexpr int INCOMING_TRANSFER_ID_ROLE = Qt::UserRole;
 
@@ -248,6 +315,31 @@ class MainWindow : public QMainWindow {
 
         // Hidden QListWidgetItem data role indicating whether the row may be removed from transfer history
         static constexpr int INCOMING_TRANSFER_REMOVABLE_ROLE = Qt::UserRole + 2;
+
+        /**
+         * IncomingTransferState
+         * Represents the lifecycle state displayed for one incoming transfer
+         */
+        enum class IncomingTransferState : int {
+            Pending = 0,
+            Waiting = 1,
+            Receiving = 2,
+            Completed = 3,
+            Rejected = 4,
+            Failed = 5
+        };
+
+        // Hidden QListWidgetItem data role containing the incoming transfer's current display state
+        static constexpr int INCOMING_TRANSFER_STATE_ROLE = Qt::UserRole + 3;
+
+        // Hidden QListWidgetItem data role containing the incoming transfer's original filename
+        static constexpr int INCOMING_TRANSFER_FILE_NAME_ROLE = Qt::UserRole + 4;
+
+        // Hidden QListWidgetItem data role containing the incoming transfer's total size in bytes
+        static constexpr int INCOMING_TRANSFER_FILE_SIZE_ROLE = Qt::UserRole + 5;
+
+        // Hidden QListWidgetItem data role containing the number of bytes received so far
+        static constexpr int INCOMING_TRANSFER_BYTES_RECEIVED_ROLE = Qt::UserRole + 6;
 
         // Discovers nearby FileBridge instances on the local network
         PeerDiscovery *peerDiscovery_;

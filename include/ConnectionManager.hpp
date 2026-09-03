@@ -88,6 +88,18 @@ class ConnectionManager : public QObject {
         bool sendFileComplete(PeerConnection *connection, const Protocol::FileCompletePayload& complete);
 
         /**
+         * sendFileCompleteAck()
+         * Sends acknowledgement that an incoming file transfer completed successfully
+         */
+        bool sendFileCompleteAck(PeerConnection *connection, const Protocol::FileCompleteAckPayload& completeAck);
+
+        /**
+         * sendError()
+         * Sends a transfer-specific failure to a validated peer
+         */
+        bool sendError(PeerConnection *connection, const Protocol::ErrorPayload& error);
+
+        /**
          * listeningPort()
          * Returns the TCP port currently used for incoming peer connections
          */
@@ -147,10 +159,28 @@ class ConnectionManager : public QObject {
         void fileCompleteReceived(PeerConnection *connection, const Protocol::FileCompletePayload& complete);
 
         /**
+         * fileCompleteAckReceived()
+         * Reports that the remote receiver finalized an outgoing file transfer
+         */
+        void fileCompleteAckReceived(PeerConnection *connection, const Protocol::FileCompleteAckPayload& completeAck);
+
+        /**
+         * errorReceived()
+         * Reports a transfer-specific failure sent by the remote peer
+         */
+        void errorReceived(PeerConnection *connection, const Protocol::ErrorPayload& error);
+
+        /**
          * peerDisconnected()
          * Reports that an established FileBridge peer connection has ended
          */
         void peerDisconnected(PeerConnection *connection);
+
+        /**
+         * peerBytesWritten()
+         * Reports bytes removed from a peer's Qt socket write buffer
+         */
+        void peerBytesWritten(PeerConnection *connection, qint64 bytes);
 
         /**
          * connectionFailed()

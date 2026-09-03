@@ -14,11 +14,29 @@ PeerConnection::PeerConnection(QTcpSocket *socket, QObject *parent) : QObject(pa
     // Make this object responsible for the accepted socket's lifetime
     socket_->setParent(this);
 
-    // Read incoming data whenever Qt reports that bytes are available
-    connect(socket_, &QTcpSocket::readyRead, this, &PeerConnection::handleReadyRead);
+    // Read incoming data whenever Qt reports that bytes are available.
+    QObject::connect(
+        socket_,                              // Sender: Underlying TCP socket.
+        &QTcpSocket::readyRead,               // Signal: Emitted when incoming bytes are available.
+        this,                                 // Receiver: This PeerConnection instance.
+        &PeerConnection::handleReadyRead      // Slot: Parses available protocol data.
+    );
 
-    // React when the remote peer closes the connection
-    connect(socket_, &QTcpSocket::disconnected, this, &PeerConnection::handleDisconnected);
+    // Forward socket write progress so higher-level transfer code can pace outgoing data.
+    QObject::connect(
+        socket_,                              // Sender: Underlying TCP socket.
+        &QTcpSocket::bytesWritten,            // Signal: Emitted as queued bytes leave Qt's write buffer.
+        this,                                 // Receiver: This PeerConnection instance.
+        &PeerConnection::bytesWritten         // Signal: Re-emitted for transfer pacing.
+    );
+
+    // React when the remote peer closes the connection.
+    QObject::connect(
+        socket_,                              // Sender: Underlying TCP socket.
+        &QTcpSocket::disconnected,            // Signal: Emitted when the TCP connection closes.
+        this,                                 // Receiver: This PeerConnection instance.
+        &PeerConnection::handleDisconnected   // Slot: Reports the peer disconnection.
+    );
 }
 
 

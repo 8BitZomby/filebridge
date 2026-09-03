@@ -1,5 +1,7 @@
 #include "MainWindow.hpp"
+
 #include "ConnectionManager.hpp"
+#include "TransferWidget.hpp"
 #include "NetworkInfo.hpp"
 #include "PeerDiscovery.hpp"
 #include "Protocol.hpp"
@@ -15,6 +17,7 @@
 #include <QHostAddress>
 #include <QIntValidator>
 #include <QLabel>
+#include <QProgressBar>
 #include <QStandardPaths>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -309,13 +312,52 @@ MainWindow::MainWindow(QWidget *parent) :
             &MainWindow::handleOutgoingTransferCompleted    // Slot: Updates the receiver's completion status
         );
 
-        // Report when an incoming transfer has been completely received and written.
+        // Report outgoing transfers that the remote peer could not complete.
+        QObject::connect(
+            &transferManager_,                              // Sender: Manager that owns outgoing transfer state.
+            &TransferManager::outgoingTransferFailed,       // Signal: Emitted when the remote peer reports transfer failure.
+            this,                                           // Receiver: This MainWindow instance.
+            &MainWindow::handleOutgoingTransferFailed       // Slot: Marks the matching sender row as Failed.
+        );
 
+        // Report incoming transfers that fail while writing the destination file.
+        QObject::connect(
+            &transferManager_,                              // Sender: Manager that owns incoming transfer state.
+            &TransferManager::incomingTransferFailed,       // Signal: Emitted when the local receive operation fails.
+            this,                                           // Receiver: This MainWindow instance.
+            &MainWindow::handleIncomingTransferFailed       // Slot: Marks the matching receiver row as Failed.
+        );
+
+        // Report when an incoming transfer has been completely received and written.
         QObject::connect(
             &transferManager_,                              // Sender: Manager that owns transfer state.
             &TransferManager::incomingTransferCompleted,    // Signal: Emitted after all expected file data is received.
             this,                                           // Receiver: This MainWindow instance.
             &MainWindow::handleIncomingTransferCompleted    // Slot: Updates the receiver's completion status.
+        );
+
+        // Update the Receive-page progress display as incoming file bytes are written.
+        QObject::connect(
+            &transferManager_,                              // Sender: Manager that tracks incoming transfer byte counts.
+            &TransferManager::incomingTransferProgress,     // Signal: Emitted after a chunk is written successfully.
+            this,                                           // Receiver: This MainWindow instance.
+            &MainWindow::handleIncomingTransferProgress     // Slot: Updates the matching incoming transfer row.
+        );
+
+        // Update the Send-page progress display as outgoing file bytes are queued.
+        QObject::connect(
+            &transferManager_,                              // Sender: Manager that tracks outgoing transfer byte counts.
+            &TransferManager::outgoingTransferProgress,     // Signal: Emitted after a file chunk is queued successfully.
+            this,                                           // Receiver: This MainWindow instance.
+            &MainWindow::handleOutgoingTransferProgress     // Slot: Updates the matching outgoing transfer row.
+        );
+
+        // Mark the outgoing row as Sent once all file data and FileComplete are queued.
+        QObject::connect(
+            &transferManager_,                          // Sender: Manager tracking outgoing transfer lifecycle.
+            &TransferManager::outgoingTransferSent,     // Signal: Emitted after all outgoing data is queued successfully.
+            this,                                       // Receiver: This MainWindow instance.
+            &MainWindow::handleOutgoingTransferSent     // Slot: Shows Sent while awaiting receiver confirmation.
         );
 
         // Use a central widget because QMainWindow reserves its outer structure for menus and toolbars
@@ -910,19 +952,48 @@ void MainWindow::handleAddFilesClicked() {
             continue;
         }
 
-        QListWidgetItem *item = new QListWidgetItem(
-            fileInfo.fileName() +
-            "    " +
-            QString::number(fileInfo.size()) +
-            " bytes",
+        // Create one persistent logical row for this outgoing file.
+        QListWidgetItem *item = new QListWidgetItem(outgoingFilesList_);
+
+        // Use the same transfer-row widget as the Receive page so sender and
+        // receiver state presentation follow the same mechanism.
+        TransferWidget *rowWidget = new TransferWidget(
+            fileInfo.fileName(),
+            static_cast<std::uint64_t>(fileInfo.size()),
             outgoingFilesList_
         );
+
+        outgoingFilesList_->setItemWidget(item, rowWidget);
+        item->setSizeHint(rowWidget->sizeHint());
 
         // Keep the full path out of the visible UI while preserving it for sending later.
         item->setData(
             OUTGOING_FILE_PATH_ROLE,       // Role: Hidden field reserved for the local file path.
             fileInfo.absoluteFilePath()    // Value: Absolute path required when FileBridge later opens the file.
         );
+
+        // Store the metadata and initial lifecycle state used by the shared row widget.
+        item->setData(
+            OUTGOING_FILE_NAME_ROLE,
+            fileInfo.fileName()
+        );
+
+        item->setData(
+            OUTGOING_FILE_SIZE_ROLE,
+            static_cast<qulonglong>(fileInfo.size())
+        );
+
+        item->setData(
+            OUTGOING_BYTES_SENT_ROLE,
+            static_cast<qulonglong>(0)
+        );
+
+        item->setData(
+            OUTGOING_TRANSFER_STATE_ROLE,
+            static_cast<int>(OutgoingTransferState::Pending)
+        );
+
+        updateOutgoingTransferDisplay(item);
     }
     updateOutgoingQueueControls();
 }
@@ -969,10 +1040,9 @@ void MainWindow::handleSendFilesClicked() {
 
 /**
  * offerQueuedFiles()
- * Sends file offers for every queued file that has not already been offered
+ * Sends offers for unresolved queued files and finishes the batch when all transfers are resolved
  */
 void MainWindow::offerQueuedFiles() {
-    // An empty queue means every file in the current batch has been resolved.
     if(outgoingFilesList_->count() == 0) {
         outgoingQueueSending_ = false;
         statusLabel_->setText("Transfer completed");
@@ -980,7 +1050,6 @@ void MainWindow::offerQueuedFiles() {
         return;
     }
 
-    // Losing the peer stops batch processing but preserves the queue for another attempt.
     if(activePeer_ == nullptr) {
         outgoingQueueSending_ = false;
         statusLabel_->setText("Disconnected");
@@ -990,13 +1059,29 @@ void MainWindow::offerQueuedFiles() {
 
     int offeredCount = 0;
     int failedCount = 0;
+    int unresolvedCount = 0;
 
-    // Offer every queued row that has not already been associated with a protocol transfer.
     for(int index = 0; index < outgoingFilesList_->count(); ++index) {
         QListWidgetItem *item = outgoingFilesList_->item(index);
 
-        // A valid transfer ID means this file has already been offered and is
-        // waiting for the receiver to accept, reject, or complete the transfer.
+        const OutgoingTransferState state =
+            static_cast<OutgoingTransferState>(
+                item->data(OUTGOING_TRANSFER_STATE_ROLE).toInt()
+            );
+
+        // Final-state rows remain visible as history but no longer participate
+        // in the active outgoing batch.
+        if(state == OutgoingTransferState::Completed ||
+            state == OutgoingTransferState::Rejected ||
+            state == OutgoingTransferState::Failed) {
+            
+            continue;
+        }
+
+        ++unresolvedCount;
+
+        // A valid transfer ID means this unresolved file has already been
+        // offered and is waiting for another lifecycle event.
         if(item->data(OUTGOING_TRANSFER_ID_ROLE).isValid()) {
             continue;
         }
@@ -1013,16 +1098,36 @@ void MainWindow::offerQueuedFiles() {
             continue;
         }
 
-        // Associate this exact queue row with the exact protocol transfer created for it.
+        // Associate this row with the exact protocol transfer created for it so
+        // later progress, completion, and rejection events can find the same row.
         item->setData(
             OUTGOING_TRANSFER_ID_ROLE,
             static_cast<qulonglong>(*transferId)
         );
 
+        // The offer has been sent successfully, so this file is now waiting
+        // for the remote peer's decision or its turn to begin transmission.
+        item->setData(
+            OUTGOING_TRANSFER_STATE_ROLE,
+            static_cast<int>(OutgoingTransferState::Waiting)
+        );
+
+        updateOutgoingTransferDisplay(item);
+
         ++offeredCount;
     }
 
-    // If every attempted offer failed, unlock the queue so the user can correct it.
+    // Visible history rows may remain even after every transfer in the current
+    // batch has reached a final state.
+    if(unresolvedCount == 0) {
+        outgoingQueueSending_ = false;
+        statusLabel_->setText("Transfer completed");
+        updateOutgoingQueueControls();
+        return;
+    }
+
+    // If every newly attempted offer failed, unlock the queue so the user can
+    // correct or remove the affected files.
     if(offeredCount == 0 && failedCount > 0) {
         outgoingQueueSending_ = false;
         statusLabel_->setText("Failed to offer queued file(s)");
@@ -1040,9 +1145,11 @@ void MainWindow::offerQueuedFiles() {
         return;
     }
 
-    statusLabel_->setText(
-        QString::number(offeredCount) + " file(s) offered"
-    );
+    if(offeredCount > 0) {
+        statusLabel_->setText(
+            QString::number(offeredCount) + " file(s) offered"
+        );
+    }
 }
 
 
@@ -1063,32 +1170,113 @@ void MainWindow::updateOutgoingQueueControls() {
 
 
 /**
+ * updateOutgoingTransferDisplay()
+ * Updates one outgoing transfer row to match its current state and progress
+ */
+void MainWindow::updateOutgoingTransferDisplay(QListWidgetItem *item) {
+    if(item == nullptr) {
+        return;
+    }
+
+    TransferWidget *rowWidget =
+        qobject_cast<TransferWidget *>(
+            outgoingFilesList_->itemWidget(item)
+        );
+
+    // Each outgoing transfer should have exactly one persistent custom row widget.
+    if(rowWidget == nullptr) {
+        return;
+    }
+
+    const OutgoingTransferState state =
+        static_cast<OutgoingTransferState>(
+            item->data(OUTGOING_TRANSFER_STATE_ROLE).toInt()
+        );
+
+    const std::uint64_t bytesSent =
+        item->data(OUTGOING_BYTES_SENT_ROLE).toULongLong();
+
+    const std::uint64_t fileSize =
+        item->data(OUTGOING_FILE_SIZE_ROLE).toULongLong();
+
+    switch(state) {
+        case OutgoingTransferState::Pending:
+            rowWidget->setStatus("Pending");
+            rowWidget->hideProgress();
+            break;
+
+        case OutgoingTransferState::Waiting:
+            rowWidget->setStatus("Waiting");
+            rowWidget->hideProgress();
+            break;
+
+        case OutgoingTransferState::Sending:
+            rowWidget->setStatus("Sending");
+            rowWidget->setProgress(bytesSent, fileSize);
+            break;
+
+        case OutgoingTransferState::Sent:
+            rowWidget->setStatus("Sent");
+            rowWidget->hideProgress();
+            break;
+
+        case OutgoingTransferState::Completed:
+            rowWidget->setStatus("Completed");
+            rowWidget->hideProgress();
+            break;
+
+        case OutgoingTransferState::Rejected:
+            rowWidget->setStatus("Rejected");
+            rowWidget->hideProgress();
+            break;
+
+        case OutgoingTransferState::Failed:
+            rowWidget->setStatus("Failed");
+            rowWidget->hideProgress();
+            break;
+    }
+
+    // Keep the QListWidget row height synchronized with the persistent custom widget.
+    item->setSizeHint(rowWidget->sizeHint());
+}
+
+
+/**
  * updateReceiveModeAttention()
  * Updates the Receive selector text and attention styling from pending incoming offers
  */
 void MainWindow::updateReceiveModeAttention() {
-    int pendingCount = 0;
+    int activeCount = 0;
 
-    // Count only offers that still require an explicit receiver decision.
+    // Count every incoming transfer that still requires either a user decision
+    // or additional transfer work before reaching a final state.
     for(int index = 0; index < incomingFilesList_->count(); ++index) {
         QListWidgetItem *item = incomingFilesList_->item(index);
 
-        if(item->data(INCOMING_TRANSFER_PENDING_ROLE).toBool()) {
-            ++pendingCount;
+        const IncomingTransferState state =
+            static_cast<IncomingTransferState>(
+                item->data(INCOMING_TRANSFER_STATE_ROLE).toInt()
+            );
+
+        if(
+            state == IncomingTransferState::Pending ||
+            state == IncomingTransferState::Waiting ||
+            state == IncomingTransferState::Receiving
+        ) {
+            ++activeCount;
         }
     }
 
-    // Show the number of unresolved incoming offers directly in the selector.
+    // Keep active incoming work visible in the selector even after offers are accepted.
     receiveModeButton_->setText(
-        pendingCount > 0
-            ? "Receive (" + QString::number(pendingCount) + ")"
+        activeCount > 0
+            ? "Receive (" + QString::number(activeCount) + ")"
             : "Receive"
     );
 
-    // Draw attention to unresolved incoming files only while the Receive page
-    // is not currently being viewed.
+    // Draw attention to active incoming work whenever the Receive page is hidden.
     const bool needsAttention =
-        pendingCount > 0 &&
+        activeCount > 0 &&
         !receiveModeButton_->isChecked();
 
     // No icon is needed because the inverted button itself is the attention signal.
@@ -1134,23 +1322,9 @@ void MainWindow::handleOutgoingTransferOffered(std::uint64_t transferId, const Q
 
 /**
  * handleOutgoingTransferAccepted()
- * Displays that the remote peer accepted an outgoing transfer
+ * Marks the matching outgoing transfer as actively sending
  */
 void MainWindow::handleOutgoingTransferAccepted(std::uint64_t transferId) {
-    // The transfer ID will be used for more detailed transfer tracking later
-    Q_UNUSED(transferId);
-
-    // Inform the sender that the receiving peer accepted the offered file
-    statusLabel_->setText("Transfer accepted");
-}
-
-
-/**
- * handleOutgoingTransferRejected()
- * Removes the outgoing queue row matching the rejected transfer ID
- */
-void MainWindow::handleOutgoingTransferRejected(std::uint64_t transferId) {
-    // Find the exact queue row associated with the rejected protocol transfer.
     for(int index = 0; index < outgoingFilesList_->count(); ++index) {
         QListWidgetItem *item = outgoingFilesList_->item(index);
 
@@ -1161,14 +1335,51 @@ void MainWindow::handleOutgoingTransferRejected(std::uint64_t transferId) {
             continue;
         }
 
-        // takeItem() removes the row from QListWidget ownership, so delete the returned item.
-        delete outgoingFilesList_->takeItem(index);
+        // Acceptance resolves the remote decision, but transmission may still
+        // wait behind another active outgoing transfer for this peer.
+        item->setData(
+            OUTGOING_TRANSFER_STATE_ROLE,
+            static_cast<int>(OutgoingTransferState::Waiting)
+        );
+
+        // Show Waiting until the first actual outgoing progress update arrives.
+        updateOutgoingTransferDisplay(item);
+        break;
+    }
+
+    statusLabel_->setText("Transfer accepted");
+}
+
+
+/**
+ * handleOutgoingTransferRejected()
+ * Marks the matching outgoing transfer as rejected and keeps its history row visible
+ */
+void MainWindow::handleOutgoingTransferRejected(std::uint64_t transferId) {
+    for(int index = 0; index < outgoingFilesList_->count(); ++index) {
+        QListWidgetItem *item = outgoingFilesList_->item(index);
+
+        const std::uint64_t itemTransferId =
+            item->data(OUTGOING_TRANSFER_ID_ROLE).toULongLong();
+
+        if(itemTransferId != transferId) {
+            continue;
+        }
+
+        // Rejection resolves the transfer without removing its visible history row.
+        item->setData(
+            OUTGOING_TRANSFER_STATE_ROLE,
+            static_cast<int>(OutgoingTransferState::Rejected)
+        );
+
+        // Show the final Rejected state using the same persistent row widget.
+        updateOutgoingTransferDisplay(item);
         break;
     }
 
     statusLabel_->setText("Transfer rejected");
 
-    // Preserve the current sequential behavior until batch offering is introduced.
+    // Re-evaluate the active batch while preserving this rejected history row.
     if(outgoingQueueSending_) {
         offerQueuedFiles();
     }
@@ -1177,10 +1388,9 @@ void MainWindow::handleOutgoingTransferRejected(std::uint64_t transferId) {
 
 /**
  * handleOutgoingTransferCompleted()
- * Removes the outgoing queue row matching the completed transfer ID
+ * Marks the matching outgoing transfer as completed and keeps its history row visible
  */
 void MainWindow::handleOutgoingTransferCompleted(std::uint64_t transferId) {
-    // Find the exact queue row associated with the completed protocol transfer.
     for(int index = 0; index < outgoingFilesList_->count(); ++index) {
         QListWidgetItem *item = outgoingFilesList_->item(index);
 
@@ -1191,17 +1401,98 @@ void MainWindow::handleOutgoingTransferCompleted(std::uint64_t transferId) {
             continue;
         }
 
-        // Remove only the row for this completed transfer.
-        delete outgoingFilesList_->takeItem(index);
+        // Remote acknowledgement is the authoritative end of the outgoing transfer.
+        item->setData(
+            OUTGOING_TRANSFER_STATE_ROLE,
+            static_cast<int>(OutgoingTransferState::Completed)
+        );
+
+        // Remove the active progress presentation and show the final Completed state.
+        updateOutgoingTransferDisplay(item);
         break;
     }
 
     statusLabel_->setText("Transfer completed");
 
-    // Preserve the current sequential behavior until batch offering is introduced.
+    // Re-evaluate the active batch while preserving this completed history row.
     if(outgoingQueueSending_) {
         offerQueuedFiles();
     }
+}
+
+
+/**
+ * handleOutgoingTransferFailed()
+ * Marks an outgoing transfer as failed and keeps its history row visible.
+ */
+void MainWindow::handleOutgoingTransferFailed(
+    std::uint64_t transferId,
+    const QString& errorMessage
+) {
+    for(int index = 0; index < outgoingFilesList_->count(); ++index) {
+        QListWidgetItem *item = outgoingFilesList_->item(index);
+
+        const std::uint64_t itemTransferId =
+            item->data(OUTGOING_TRANSFER_ID_ROLE).toULongLong();
+
+        if(itemTransferId != transferId) {
+            continue;
+        }
+
+        item->setData(
+            OUTGOING_TRANSFER_STATE_ROLE,
+            static_cast<int>(OutgoingTransferState::Failed)
+        );
+
+        updateOutgoingTransferDisplay(item);
+        break;
+    }
+
+    // Re-evaluate the active batch while preserving the failed history row.
+    if(outgoingQueueSending_) {
+        offerQueuedFiles();
+    }
+
+    // Keep the actual failure visible even if batch reevaluation reaches a final state.
+    statusLabel_->setText("Transfer failed: " + errorMessage);
+}
+
+
+/**
+ * handleIncomingTransferFailed()
+ * Marks an incoming transfer as failed and allows its history row to be removed.
+ */
+void MainWindow::handleIncomingTransferFailed(
+    std::uint64_t transferId,
+    const QString& errorMessage
+) {
+    for(int index = 0; index < incomingFilesList_->count(); ++index) {
+        QListWidgetItem *item = incomingFilesList_->item(index);
+
+        const std::uint64_t itemTransferId =
+            item->data(INCOMING_TRANSFER_ID_ROLE).toULongLong();
+
+        if(itemTransferId != transferId) {
+            continue;
+        }
+
+        item->setData(INCOMING_TRANSFER_PENDING_ROLE, false);
+        item->setData(INCOMING_TRANSFER_REMOVABLE_ROLE, true);
+
+        item->setData(
+            INCOMING_TRANSFER_STATE_ROLE,
+            static_cast<int>(IncomingTransferState::Failed)
+        );
+
+        updateIncomingTransferDisplay(item);
+        break;
+    }
+
+    updateReceiveModeAttention();
+    updateIncomingDecisionControls();
+    updateIncomingRemoveControl();
+
+    statusLabel_->setText("Transfer failed: " + errorMessage);
 }
 
 
@@ -1224,6 +1515,18 @@ void MainWindow::handleIncomingTransferCompleted(std::uint64_t transferId) {
         // Completed transfers are no longer pending and may now be removed from the visible history.
         item->setData(INCOMING_TRANSFER_PENDING_ROLE, false);
         item->setData(INCOMING_TRANSFER_REMOVABLE_ROLE, true);
+
+        // Record the final state so the Receive list can replace any progress
+        // display with a simple Completed status.
+        item->setData(
+            INCOMING_TRANSFER_STATE_ROLE,
+            static_cast<int>(IncomingTransferState::Completed)
+        );
+
+        // Rebuild the row so the progress bar is removed and the final
+        // Completed state is shown as a simple one-line entry
+        updateIncomingTransferDisplay(item);
+
         break;
     }
 
@@ -1236,24 +1539,120 @@ void MainWindow::handleIncomingTransferCompleted(std::uint64_t transferId) {
 
 
 /**
+ * handleOutgoingTransferSent()
+ * Marks the matching outgoing transfer as sent while awaiting receiver confirmation
+ */
+void MainWindow::handleOutgoingTransferSent(std::uint64_t transferId) {
+    for(int index = 0; index < outgoingFilesList_->count(); ++index) {
+        QListWidgetItem *item = outgoingFilesList_->item(index);
+
+        const std::uint64_t itemTransferId =
+            item->data(OUTGOING_TRANSFER_ID_ROLE).toULongLong();
+
+        if(itemTransferId != transferId) {
+            continue;
+        }
+
+        // All local file data has been queued, but the receiver has not yet
+        // confirmed that the transfer was finalized successfully.
+        item->setData(
+            OUTGOING_TRANSFER_STATE_ROLE,
+            static_cast<int>(OutgoingTransferState::Sent)
+        );
+
+        // Replace the progress bar with the intermediate Sent state.
+        updateOutgoingTransferDisplay(item);
+        break;
+    }
+
+    statusLabel_->setText("Transfer sent, waiting for confirmation");
+}
+
+
+/**
+ * handleIncomingTransferProgress()
+ * Updates the visible progress for an incoming file transfer
+ */
+void MainWindow::handleIncomingTransferProgress(
+    std::uint64_t transferId,
+    std::uint64_t bytesReceived,
+    std::uint64_t fileSize) {
+    
+    for(int index = 0; index < incomingFilesList_->count(); ++index) {
+        QListWidgetItem *item = incomingFilesList_->item(index);
+
+        const std::uint64_t itemTransferId = item->data(INCOMING_TRANSFER_ID_ROLE).toULongLong();
+
+        if(itemTransferId != transferId) {
+            continue;
+        }
+
+        // Keep the latest transfer counters in the item so presentation remains
+        // independent from TransferManager's internal transfer-state storage.
+        item->setData(
+            INCOMING_TRANSFER_BYTES_RECEIVED_ROLE,
+            static_cast<qulonglong>(bytesReceived)
+        );
+
+        item->setData(
+            INCOMING_TRANSFER_FILE_SIZE_ROLE,
+            static_cast<qulonglong>(fileSize)
+        );
+
+        // Progress signals belong to an active receiving transfer.
+        item->setData(
+            INCOMING_TRANSFER_STATE_ROLE,
+            static_cast<int>(IncomingTransferState::Receiving)
+        );
+
+        // Rebuild the matching row so the progress bar reflects the latest received-byte count
+        updateIncomingTransferDisplay(item);
+        break;
+    }
+}
+
+
+/**
  * handleIncomingTransferOffered()
  * Adds a newly offered file to the incoming list and applies the current connection approval policy
  */
 void MainWindow::handleIncomingTransferOffered(const TransferManager::IncomingTransfer& transfer) {
-    // Create one visible row for this incoming offer.
-    QListWidgetItem *item = new QListWidgetItem(
-        transfer.fileName +
-        "    " +
-        QString::number(transfer.fileSize) +
-        " bytes",
+    // Create the QListWidgetItem as the persistent logical row for this transfer.
+    QListWidgetItem *item = new QListWidgetItem(incomingFilesList_);
+
+    // Give the logical row one persistent custom widget that will change its
+    // status and progress display throughout the transfer lifecycle.
+    TransferWidget *rowWidget = new TransferWidget(
+        transfer.fileName,
+        transfer.fileSize,
         incomingFilesList_
     );
+
+    incomingFilesList_->setItemWidget(item, rowWidget);
+    item->setSizeHint(rowWidget->sizeHint());
 
     // Store the protocol transfer ID invisibly in the row so later Accept/Reject
     // actions can identify the exact TransferManager transfer represented by it.
     item->setData(
         INCOMING_TRANSFER_ID_ROLE,                         // Role: Hidden field reserved for the incoming transfer ID.
         static_cast<qulonglong>(transfer.transferId)       // Value: Sender-assigned identifier used by transfer messages.
+    );
+
+    // Keep the transfer metadata available independently of the row's visible presentation.
+    item->setData(
+        INCOMING_TRANSFER_FILE_NAME_ROLE,
+        transfer.fileName
+    );
+
+    item->setData(
+        INCOMING_TRANSFER_FILE_SIZE_ROLE,
+        static_cast<qulonglong>(transfer.fileSize)
+    );
+
+    // No file bytes have been written yet when the offer first arrives.
+    item->setData(
+        INCOMING_TRANSFER_BYTES_RECEIVED_ROLE,
+        static_cast<qulonglong>(0)
     );
 
     // Manual incoming offer begin in the pending state until the receiver accepts or rejects them
@@ -1268,6 +1667,14 @@ void MainWindow::handleIncomingTransferOffered(const TransferManager::IncomingTr
         false
     );
 
+    // A manually reviewed offer remains Pending until the receiver accepts or rejects it.
+    item->setData(
+        INCOMING_TRANSFER_STATE_ROLE,
+        static_cast<int>(IncomingTransferState::Pending)
+    );
+
+    updateIncomingTransferDisplay(item);
+
     // Refresh the Receive selector before processing the connection's approval policy
     updateReceiveModeAttention();
 
@@ -1278,8 +1685,17 @@ void MainWindow::handleIncomingTransferOffered(const TransferManager::IncomingTr
             return;
         }
 
-        // Automatic acceptance leaves no user decision pending for this row
-        updateIncomingDecisionControls();
+        // Acceptance resolves the decision, but file data may still wait behind
+        // another active transfer from this peer.
+        item->setData(
+            INCOMING_TRANSFER_STATE_ROLE,
+            static_cast<int>(IncomingTransferState::Waiting)
+        );
+
+        // Automatically accepted incoming files are active work, so show their
+        // transfer page immediately instead of leaving the user on the Send page.
+        receiveModeButton_->setChecked(true);
+        handleReceiveModeClicked();
 
         statusLabel_->setText(
             "Receiving: " +
@@ -1335,6 +1751,16 @@ void MainWindow::handleAcceptAllIncomingClicked() {
         item->setData(INCOMING_TRANSFER_PENDING_ROLE, false);
         item->setData(INCOMING_TRANSFER_REMOVABLE_ROLE, false);
 
+        // Acceptance resolves the decision, but file data may still be queued
+        // behind another active transfer from this peer.
+        item->setData(
+            INCOMING_TRANSFER_STATE_ROLE,
+            static_cast<int>(IncomingTransferState::Waiting)
+        );
+
+        // Show Waiting until the first incoming progress update confirms data is arriving.
+        updateIncomingTransferDisplay(item);
+
         ++acceptedCount;
     }
 
@@ -1384,6 +1810,16 @@ void MainWindow::handleRejectAllIncomingClicked() {
         // now be removed whenever the user chooses.
         item->setData(INCOMING_TRANSFER_PENDING_ROLE, false);
         item->setData(INCOMING_TRANSFER_REMOVABLE_ROLE, true);
+
+        // Record the resolved state so the Receive list can display Rejected.
+        item->setData(
+            INCOMING_TRANSFER_STATE_ROLE,
+            static_cast<int>(IncomingTransferState::Rejected)
+        );
+
+        // Rebuild the row so the resolved transfer immediately displays Rejected
+        // and no longer shows any receiving progress presentation
+        updateIncomingTransferDisplay(item);
 
         ++rejectedCount;
     }
@@ -1491,6 +1927,113 @@ void MainWindow::updateIncomingDecisionControls() {
 
     acceptTransferButton_->setEnabled(hasPendingTransfer);
     rejectTransferButton_->setEnabled(hasPendingTransfer);
+}
+
+
+/**
+ * updateIncomingTransferDisplay()
+ * Updates one incoming transfer row to match its current state and progress
+ */
+void MainWindow::updateIncomingTransferDisplay(QListWidgetItem *item) {
+    if(item == nullptr) {
+        return;
+    }
+
+    TransferWidget *rowWidget = qobject_cast<TransferWidget *>(incomingFilesList_->itemWidget(item));
+
+    // Each incoming transfer should have exactly one persistent custom row widget.
+    if(rowWidget == nullptr) {
+        return;
+    }
+
+    const IncomingTransferState state =
+        static_cast<IncomingTransferState>(
+            item->data(INCOMING_TRANSFER_STATE_ROLE).toInt()
+        );
+
+    const std::uint64_t bytesReceived =
+        item->data(INCOMING_TRANSFER_BYTES_RECEIVED_ROLE).toULongLong();
+
+    const std::uint64_t fileSize =
+        item->data(INCOMING_TRANSFER_FILE_SIZE_ROLE).toULongLong();
+
+    switch(state) {
+        case IncomingTransferState::Pending:
+            rowWidget->setStatus("Pending");
+            rowWidget->hideProgress();
+            break;
+
+        case IncomingTransferState::Waiting:
+            rowWidget->setStatus("Waiting");
+            rowWidget->hideProgress();
+            break;
+
+        case IncomingTransferState::Receiving:
+            rowWidget->setStatus("Receiving");
+            rowWidget->setProgress(bytesReceived, fileSize);
+            break;
+
+        case IncomingTransferState::Completed:
+            rowWidget->setStatus("Completed");
+            rowWidget->hideProgress();
+            break;
+
+        case IncomingTransferState::Rejected:
+            rowWidget->setStatus("Rejected");
+            rowWidget->hideProgress();
+            break;
+
+        case IncomingTransferState::Failed:
+            rowWidget->setStatus("Failed");
+            rowWidget->hideProgress();
+            break;
+    }
+
+    // Keep the QListWidget row height synchronized with the persistent custom widget.
+    item->setSizeHint(rowWidget->sizeHint());
+}
+
+
+/**
+ * handleOutgoingTransferProgress()
+ * Updates the matching outgoing transfer row as additional file data is sent
+ */
+void MainWindow::handleOutgoingTransferProgress(
+    std::uint64_t transferId,
+    std::uint64_t bytesSent,
+    std::uint64_t fileSize
+) {
+    for(int index = 0; index < outgoingFilesList_->count(); ++index) {
+        QListWidgetItem *item = outgoingFilesList_->item(index);
+
+        const std::uint64_t itemTransferId =
+            item->data(OUTGOING_TRANSFER_ID_ROLE).toULongLong();
+
+        if(itemTransferId != transferId) {
+            continue;
+        }
+
+        // Keep the latest sender-side byte count stored with the logical transfer row.
+        item->setData(
+            OUTGOING_BYTES_SENT_ROLE,
+            static_cast<qulonglong>(bytesSent)
+        );
+
+        item->setData(
+            OUTGOING_FILE_SIZE_ROLE,
+            static_cast<qulonglong>(fileSize)
+        );
+
+        // Progress updates belong to an actively sending transfer.
+        item->setData(
+            OUTGOING_TRANSFER_STATE_ROLE,
+            static_cast<int>(OutgoingTransferState::Sending)
+        );
+
+        // Rebuild the matching row so the progress bar reflects the latest sent-byte count.
+        updateOutgoingTransferDisplay(item);
+        break;
+    }
 }
 
 

@@ -312,6 +312,56 @@ bool ConnectionManager::sendFileComplete(PeerConnection *connection, const Proto
 
 
 /**
+ * sendFileCompleteAck()
+ * Sends acknowledgement that an incoming file transfer completed successfully
+ */
+bool ConnectionManager::sendFileCompleteAck(PeerConnection *connection, const Protocol::FileCompleteAckPayload& completeAck) {
+    const auto peer = std::find_if(
+        connections_.begin(),
+        connections_.end(),
+        [connection](const ManagedPeer& managedPeer) {
+            return managedPeer.connection == connection;
+        }
+    );
+
+    // Transfer acknowledgements may only be sent to validated and approved peers.
+    if(peer == connections_.end() || !peer->handshakeReceived || !peer->approved) {
+        return false;
+    }
+
+    // Build the complete FileCompleteAck protocol message for the finalized transfer.
+    const Protocol::Message message =
+        Protocol::makeFileCompleteAckMessage(completeAck);
+
+    return connection->sendMessage(message);
+}
+
+
+/**
+ * sendError()
+ * Sends a transfer-specific failure to a validated peer
+ */
+bool ConnectionManager::sendError(PeerConnection *connection, const Protocol::ErrorPayload& error) {
+    const auto peer = std::find_if(
+        connections_.begin(),
+        connections_.end(),
+        [connection](const ManagedPeer& managedPeer) {
+            return managedPeer.connection == connection;
+        }
+    );
+
+    // Transfer errors may only be sent to validated and approved peers.
+    if(peer == connections_.end() || !peer->handshakeReceived || !peer->approved) {
+        return false;
+    }
+
+    const Protocol::Message message = Protocol::makeErrorMessage(error);
+
+    return connection->sendMessage(message);
+}
+
+
+/**
  * listeningPort()
  * Returns the TCP port currently used for incoming peer connections
  */
@@ -352,6 +402,16 @@ void ConnectionManager::handleEstablishedSocket(QTcpSocket *socket, ConnectionDi
         [this, connection](const Protocol::Message& message) {
 
             handleMessage(connection, message);
+        }
+    );
+
+    // Forward socket write progress together with the PeerConnection that produced it.
+    QObject::connect(
+        connection,                              // Sender: Managed PeerConnection for this socket.
+        &PeerConnection::bytesWritten,           // Signal: Emitted as queued socket bytes are written.
+        this,                                    // Receiver: This ConnectionManager instance.
+        [this, connection](qint64 bytes) {        // Slot: Associates the byte count with its originating peer.
+            emit peerBytesWritten(connection, bytes);
         }
     );
 
@@ -462,7 +522,8 @@ void ConnectionManager::handleMessage(PeerConnection *connection, const Protocol
         message.header.type == Protocol::MessageType::FileAccept ||
         message.header.type == Protocol::MessageType::FileReject ||
         message.header.type == Protocol::MessageType::FileData ||
-        message.header.type == Protocol::MessageType::FileComplete;
+        message.header.type == Protocol::MessageType::FileComplete ||
+        message.header.type == Protocol::MessageType::FileCompleteAck;
 
     if(isTransferMessage && !peer->approved) {
         qDebug() << "Received transfer message before connection approval";
@@ -614,10 +675,30 @@ void ConnectionManager::handleMessage(PeerConnection *connection, const Protocol
             break;
         }
 
+        case Protocol::MessageType::FileCompleteAck: {
+            Protocol::FileCompleteAckPayload completeAck;
+            // Reject malformed completion acknowledgements before exposing them
+            // to the transfer-management layer.
+            if(!Protocol::deserializeFileCompleteAckPayload(message.payload, completeAck)) {
+                qDebug() << "Invalid FileCompleteAck payload";
+                connection->disconnectFromPeer();
+                return;
+            }
+            emit fileCompleteAckReceived(connection, completeAck);
+            break;
+        }
+
         case Protocol::MessageType::Error: {
-            // Transfer-level handling will be added as each protocol message is implemented
-            qDebug() << "Received unhandled message type:"
-                     << static_cast<std::uint8_t>(message.header.type);
+            Protocol::ErrorPayload error;
+
+            // Reject malformed transfer errors before exposing them to TransferManager.
+            if(!Protocol::deserializeErrorPayload(message.payload, error)) {
+                qDebug() << "Invalid Error payload";
+                connection->disconnectFromPeer();
+                return;
+            }
+
+            emit errorReceived(connection, error);
             break;
         }
 

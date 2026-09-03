@@ -1,4 +1,5 @@
 #include "TransferManager.hpp"
+
 #include "ConnectionManager.hpp"
 #include "Protocol.hpp"
 
@@ -60,6 +61,30 @@ TransferManager::TransferManager(ConnectionManager *connectionManager, QObject *
             &ConnectionManager::fileCompleteReceived,           // Signal: Emitted when a valid FileComplete message is received
             this,                                               // Receiver: This TransferManager instance
             &TransferManager::handleFileCompleteReceived        // Slot: Verifies and finalizes the incoming transfer
+        );
+
+        // Receive confirmation that the remote peer fully finalized one outgoing transfer.
+        QObject::connect(
+            connectionManager_,                                  // Sender: ConnectionManager that decoded the acknowledgement.
+            &ConnectionManager::fileCompleteAckReceived,          // Signal: Emitted for a valid FileCompleteAck message.
+            this,                                                 // Receiver: This TransferManager instance.
+            &TransferManager::handleFileCompleteAckReceived       // Slot: Finalizes the matching outgoing transfer.
+        );
+
+        // Receive transfer-specific failures reported by the remote peer.
+        QObject::connect(
+            connectionManager_,                      // Sender: ConnectionManager that decoded the Error message.
+            &ConnectionManager::errorReceived,       // Signal: Emitted for a valid transfer-specific Error payload.
+            this,                                    // Receiver: This TransferManager instance.
+            &TransferManager::handleErrorReceived    // Slot: Stops and reports the matching outgoing transfer.
+        );
+
+        // Continue asynchronous outgoing transfers as the peer socket drains queued bytes.
+        QObject::connect(
+            connectionManager_,                             // Sender: ConnectionManager forwarding peer socket write progress.
+            &ConnectionManager::peerBytesWritten,           // Signal: Emitted when queued bytes leave one peer's socket buffer.
+            this,                                           // Receiver: This TransferManager instance.
+            &TransferManager::handlePeerBytesWritten        // Slot: Sends the next chunk for that peer when appropriate.
         );
 
         // Remove transfer state before ConnectionManager destroys a disconnected peer.
@@ -124,13 +149,17 @@ std::optional<std::uint64_t> TransferManager::offerFile(PeerConnection *connecti
         return std::nullopt;
     }
 
-    // Remember the local file and peer so later transfer reponses can be matched correctly
+    // Remember the local file and peer so later transfer responses can be matched correctly.
+    // The source file itself is opened only after the remote peer accepts the offer.
     outgoingTransfers_.emplace(
         transferId,
         OutgoingTransfer {
-            transferId,
-            filePath,
-            connection
+            transferId,                                     // transferId: Protocol identifier for this transfer.
+            filePath,                                       // filePath: Full local path of the source file.
+            connection,                                     // connection: Peer that received the offer.
+            nullptr,                                        // file: Opened later when transmission actually begins.
+            static_cast<std::uint64_t>(fileInfo.size()),    // fileSize: Total source-file size in bytes.
+            0                                               // bytesSent: No file data has been sent yet.
         }
     );
 
@@ -261,7 +290,7 @@ void TransferManager::handleFileOfferReceived(PeerConnection *connection, const 
 
 /**
  * handleFileAcceptReceived()
- * Starts sending file contents after the remote peer accepts an outgoing transfer.
+ * Starts or queues an outgoing transfer after the remote peer accepts it.
  */
 void TransferManager::handleFileAcceptReceived(PeerConnection *connection, const Protocol::FileAcceptPayload& accept) {
     // Locate the outgoing transfer identified by the acceptance message.
@@ -282,9 +311,19 @@ void TransferManager::handleFileAcceptReceived(PeerConnection *connection, const
     // Notify the GUI that the remote peer accepted the offered file.
     emit outgoingTransferAccepted(accept.transferId);
 
-    // Begin sending the accepted file as a sequence of FileData messages.
+    // Only one file may actively transmit to a peer at a time. Accepted files
+    // beyond the active one wait in arrival order until that transfer finishes.
+    if(activeOutgoingTransfers_.contains(connection)) {
+        queuedOutgoingTransfers_[connection].push_back(accept.transferId);
+        return;
+    }
+
+    // Record this transfer as the peer's active sender before transmission starts.
+    activeOutgoingTransfers_[connection] = accept.transferId;
+
     if(!sendFileContents(transfer->second)) {
         qDebug() << "Failed to send accepted file contents";
+        activeOutgoingTransfers_.erase(connection);
         return;
     }
 }
@@ -308,6 +347,41 @@ void TransferManager::handleFileRejectReceived(PeerConnection *connection, const
     outgoingTransfers_.erase(transfer);
     // Emit a signal to the GUI can report that the outgoing transfer was rejected
     emit outgoingTransferRejected(reject.transferId);
+}
+
+
+/**
+ * failIncomingTransfer()
+ * Reports a local incoming-transfer failure to both the remote peer and the GUI.
+ */
+void TransferManager::failIncomingTransfer(
+    std::uint64_t transferId,
+    Protocol::TransferErrorCode errorCode,
+    const QString& errorMessage
+) {
+    const auto transfer = incomingTransfers_.find(transferId);
+
+    if(transfer == incomingTransfers_.end()) {
+        return;
+    }
+
+    PeerConnection *connection = transfer->second.connection;
+
+    const Protocol::ErrorPayload error {
+        transferId,
+        errorCode,
+        "Transfer failed on remote device"
+    };
+
+    // Tell the sender to stop transmitting this transfer as soon as possible.
+    if(!connectionManager_->sendError(connection, error)) {
+        qDebug() << "Failed to send transfer Error message";
+    }
+
+    // Report the same failure locally before discarding TransferManager state.
+    emit incomingTransferFailed(transferId, errorMessage);
+
+    incomingTransfers_.erase(transfer);
 }
 
 
@@ -361,15 +435,32 @@ void TransferManager::handleFileDataReceived(
     QFile destinationFile(transfer->second.destinationPath);
 
     if(!destinationFile.open(QIODevice::ReadWrite)) {
-        qDebug() << "Failed to open destination file:"
-                 << destinationFile.errorString();
+        const QString errorMessage =
+            "Failed to open destination file: " +
+            destinationFile.errorString();
+
+        qDebug() << errorMessage;
+
+        failIncomingTransfer(
+            fileData.transferId,
+            Protocol::TransferErrorCode::FileOpenFailed,
+            errorMessage
+        );
         return;
     }
 
-    // Position the file cursor at the exact byte offset represented by this chunk.
     if(!destinationFile.seek(static_cast<qint64>(fileData.offset))) {
-        qDebug() << "Failed to seek destination file:"
-                 << destinationFile.errorString();
+        const QString errorMessage =
+            "Failed to seek destination file: " +
+            destinationFile.errorString();
+
+        qDebug() << errorMessage;
+
+        failIncomingTransfer(
+            fileData.transferId,
+            Protocol::TransferErrorCode::FileSeekFailed,
+            errorMessage
+        );
         return;
     }
 
@@ -377,15 +468,32 @@ void TransferManager::handleFileDataReceived(
     const qint64 bytesWritten = destinationFile.write(fileData.data);
 
     if(bytesWritten != fileData.data.size()) {
+        const QString errorMessage =
+            "Failed to write destination file: " +
+            destinationFile.errorString();
+
         qDebug() << "Failed to write complete chunk:"
                  << "expected =" << fileData.data.size()
                  << "written =" << bytesWritten
                  << "error =" << destinationFile.errorString();
+
+        failIncomingTransfer(
+            fileData.transferId,
+            Protocol::TransferErrorCode::FileWriteFailed,
+            errorMessage
+        );
         return;
     }
 
     // Record the exact number of file bytes successfully written so far.
     transfer->second.bytesReceived += chunkSize;
+
+    // Report progress only after the chunk has been written successfully
+    emit incomingTransferProgress(
+        transfer->second.transferId,
+        transfer->second.bytesReceived,
+        transfer->second.fileSize
+    );
 }
 
 
@@ -412,99 +520,351 @@ void TransferManager::handleFileCompleteReceived(PeerConnection *connection, con
         return;
     }
 
-    // Notify the GUI that the incoming file was completely received and written
+    // Confirm successful receipt only after the full offered byte count has been written.
+    const Protocol::FileCompleteAckPayload completeAck {
+        complete.transferId
+    };
+
+    if(!connectionManager_->sendFileCompleteAck(connection, completeAck)) {
+        qDebug() << "Failed to send FileCompleteAck";
+        return;
+    }
+
+    // Notify the local GUI that the incoming file was completely received and written.
     emit incomingTransferCompleted(complete.transferId);
 
-    // The completed incoming transfer no longer needs to remain tracked
+    // The completed incoming transfer no longer needs to remain tracked.
     incomingTransfers_.erase(transfer);
 }
 
 
 /**
+ * handleFileCompleteAckReceived()
+ * Finalizes an outgoing transfer and starts the next queued transfer for that peer.
+ */
+void TransferManager::handleFileCompleteAckReceived(
+    PeerConnection *connection,
+    const Protocol::FileCompleteAckPayload& completeAck
+) {
+    const auto transfer = outgoingTransfers_.find(completeAck.transferId);
+
+    // Ignore acknowledgements that do not match a known outgoing transfer.
+    if(transfer == outgoingTransfers_.end()) {
+        return;
+    }
+
+    // Reject acknowledgements that came from a different peer than the original transfer.
+    if(transfer->second.connection != connection) {
+        return;
+    }
+
+    // Only the transfer currently assigned to this peer may be finalized.
+    const auto activeTransfer = activeOutgoingTransfers_.find(connection);
+
+    if(
+        activeTransfer == activeOutgoingTransfers_.end() ||
+        activeTransfer->second != completeAck.transferId
+    ) {
+        return;
+    }
+
+    // The receiver has now confirmed that the file was fully received and finalized.
+    emit outgoingTransferCompleted(completeAck.transferId);
+
+    outgoingTransfers_.erase(transfer);
+    activeOutgoingTransfers_.erase(activeTransfer);
+
+    startNextQueuedOutgoingTransfer(connection);
+}
+
+
+/**
+ * handleErrorReceived()
+ * Stops an outgoing transfer after the remote peer reports a transfer failure.
+ */
+void TransferManager::handleErrorReceived(
+    PeerConnection *connection,
+    const Protocol::ErrorPayload& error
+) {
+    const auto transfer = outgoingTransfers_.find(error.transferId);
+
+    // Ignore errors that do not correspond to a transfer currently owned locally.
+    if(transfer == outgoingTransfers_.end()) {
+        return;
+    }
+
+    // A peer may only fail a transfer that was originally offered to that same peer.
+    if(transfer->second.connection != connection) {
+        return;
+    }
+
+    // Stop reading additional source data immediately if this transfer was active.
+    if(transfer->second.file != nullptr) {
+        transfer->second.file->close();
+        delete transfer->second.file;
+        transfer->second.file = nullptr;
+    }
+
+    // Release this peer's active slot when the failed transfer was the active sender.
+    const auto activeTransfer = activeOutgoingTransfers_.find(connection);
+    if(
+        activeTransfer != activeOutgoingTransfers_.end() &&
+        activeTransfer->second == error.transferId
+    ) {
+        activeOutgoingTransfers_.erase(activeTransfer);
+    }
+
+    // Preserve the remote diagnostic message for the GUI before discarding transfer state.
+    emit outgoingTransferFailed(error.transferId, error.message);
+
+    outgoingTransfers_.erase(transfer);
+
+    // A failed active transfer must not block later accepted files for this peer.
+    startNextQueuedOutgoingTransfer(connection);
+}
+
+
+/**
+ * handlePeerBytesWritten()
+ * Continues the active outgoing transfer after the peer socket finishes draining queued bytes.
+ */
+void TransferManager::handlePeerBytesWritten(PeerConnection *connection, qint64 bytes) {
+    Q_UNUSED(bytes);
+
+    if(connection == nullptr || connection->socket() == nullptr) {
+        return;
+    }
+
+    // bytesWritten may be emitted several times for one queued message. Wait until
+    // Qt's write buffer is completely empty before queueing the next file chunk.
+    if(connection->socket()->bytesToWrite() > 0) {
+        return;
+    }
+
+    // Only the transfer explicitly assigned as active for this peer may continue.
+    const auto activeTransfer = activeOutgoingTransfers_.find(connection);
+    if(activeTransfer == activeOutgoingTransfers_.end()) {
+        return;
+    }
+
+    const auto transfer = outgoingTransfers_.find(activeTransfer->second);
+    if(transfer == outgoingTransfers_.end()) {
+        qDebug() << "Active outgoing transfer was not found";
+        activeOutgoingTransfers_.erase(activeTransfer);
+        return;
+    }
+
+    // A transfer with no open source file has already queued all of its data and
+    // is waiting for the receiver's FileCompleteAck.
+    if(transfer->second.file == nullptr) {
+        return;
+    }
+
+    if(!sendNextOutgoingChunk(transfer->second)) {
+        qDebug() << "Failed to continue outgoing file transfer";
+
+        transfer->second.file->close();
+        delete transfer->second.file;
+        transfer->second.file = nullptr;
+    }
+}
+
+
+/**
  * handlePeerDisconnected()
- * Removes transfer state associated with a peer that is no longer connected
+ * Fails and removes transfer state associated with a peer that is no longer connected.
  */
 void TransferManager::handlePeerDisconnected(PeerConnection *connection) {
-    // Erasing from std::unordered_map invalidates only the iterator for the
-    // erased element, and erase() returns the next valid iterator.
+    // The disconnected peer can no longer have an active or queued sender schedule.
+    activeOutgoingTransfers_.erase(connection);
+    queuedOutgoingTransfers_.erase(connection);
+
+    // Every unresolved outgoing transfer for this peer has been interrupted and
+    // must become Failed rather than silently disappearing from TransferManager.
     for(auto transfer = outgoingTransfers_.begin(); transfer != outgoingTransfers_.end();) {
-        if(transfer->second.connection == connection) {
-            transfer = outgoingTransfers_.erase(transfer);
-        }
-        else {
+        if(transfer->second.connection != connection) {
             ++transfer;
+            continue;
         }
+
+        // Release any source file that was still open for asynchronous sending.
+        if(transfer->second.file != nullptr) {
+            transfer->second.file->close();
+            delete transfer->second.file;
+            transfer->second.file = nullptr;
+        }
+
+        const std::uint64_t transferId = transfer->second.transferId;
+
+        // Notify the GUI before removing the transfer so its persistent history
+        // row records that the connection interruption caused the failure.
+        emit outgoingTransferFailed(
+            transferId,
+            "Peer disconnected"
+        );
+
+        transfer = outgoingTransfers_.erase(transfer);
     }
-    // Incoming transfers also retain the disconnected PeerConnection pointer,
-    // so those entries must be removed before that peer object is destroyed.
+
+    // Incoming transfers are also unresolved once their sending peer disappears.
     for(auto transfer = incomingTransfers_.begin(); transfer != incomingTransfers_.end();) {
-        if(transfer->second.connection == connection) {
-            transfer = incomingTransfers_.erase(transfer);
-        }
-        else {
+        if(transfer->second.connection != connection) {
             ++transfer;
+            continue;
         }
+
+        const std::uint64_t transferId = transfer->second.transferId;
+
+        // Preserve the interrupted transfer as Failed in the receiver's history.
+        emit incomingTransferFailed(
+            transferId,
+            "Peer disconnected"
+        );
+
+        transfer = incomingTransfers_.erase(transfer);
     }
 }
 
 
 /**
  * sendFileContents()
- * Reads one accepted local file in chunks and sends each chunk to the peer.
+ * Opens an accepted source file and starts its asynchronous chunk transmission
  */
-bool TransferManager::sendFileContents(const OutgoingTransfer& transfer) {
-    // Open the original local file for read-only binary access.
-    QFile file(transfer.filePath);
-
-    if(!file.open(QIODevice::ReadOnly)) {
-        qDebug() << "Failed to open source file:" << file.errorString();
+bool TransferManager::sendFileContents(OutgoingTransfer& transfer) {
+    // A transfer should never have more than one source file open at the same time.
+    if(transfer.file != nullptr) {
         return false;
     }
 
-    // Keep individual protocol messages reasonably small instead of loading the entire file at once.
+    transfer.file = new QFile(transfer.filePath);
+
+    if(!transfer.file->open(QIODevice::ReadOnly)) {
+        qDebug() << "Failed to open source file:"
+                 << transfer.file->errorString();
+
+        delete transfer.file;
+        transfer.file = nullptr;
+
+        return false;
+    }
+
+    // Start this transfer from the beginning of the source file.
+    transfer.bytesSent = 0;
+
+    // Queue only the first chunk here. Future chunks are triggered after Qt
+    // reports that previously queued socket bytes have been written.
+    if(!sendNextOutgoingChunk(transfer)) {
+        transfer.file->close();
+        delete transfer.file;
+        transfer.file = nullptr;
+
+        return false;
+    }
+
+    return true;
+}
+
+
+/**
+ * startNextQueuedOutgoingTransfer()
+ * Starts the next accepted outgoing transfer waiting for the specified peer.
+ */
+void TransferManager::startNextQueuedOutgoingTransfer(PeerConnection *connection) {
+    if(connection == nullptr || activeOutgoingTransfers_.contains(connection)) {
+        return;
+    }
+
+    const auto queue = queuedOutgoingTransfers_.find(connection);
+
+    if(queue == queuedOutgoingTransfers_.end() || queue->second.empty()) {
+        return;
+    }
+
+    // Accepted transfers begin in the same FIFO order in which they were queued.
+    const std::uint64_t nextTransferId = queue->second.front();
+    queue->second.pop_front();
+
+    if(queue->second.empty()) {
+        queuedOutgoingTransfers_.erase(queue);
+    }
+
+    const auto nextTransfer = outgoingTransfers_.find(nextTransferId);
+
+    if(nextTransfer == outgoingTransfers_.end()) {
+        qDebug() << "Queued outgoing transfer was not found";
+        return;
+    }
+
+    // Claim the active slot before transmission begins so only one file
+    // can send to this peer at a time.
+    activeOutgoingTransfers_[connection] = nextTransferId;
+
+    if(!sendFileContents(nextTransfer->second)) {
+        qDebug() << "Failed to send next queued file";
+        activeOutgoingTransfers_.erase(connection);
+    }
+}
+
+
+/**
+ * sendNextOutgoingChunk()
+ * Sends the next chunk of an active outgoing transfer and returns control to Qt
+ */
+bool TransferManager::sendNextOutgoingChunk(OutgoingTransfer& transfer) {
+    if(transfer.file == nullptr || !transfer.file->isOpen()) {
+        return false;
+    }
+
+    // Keep individual protocol messages reasonably small so Qt can return to
+    // the event loop between chunks and repaint sender-side transfer progress.
     constexpr qint64 CHUNK_SIZE = 64 * 1024;
 
-    std::uint64_t offset = 0;
-
-    // Read and send the file sequentially until no bytes remain.
-    while(!file.atEnd()) {
-        const QByteArray chunk = file.read(CHUNK_SIZE);
-
-        // An unexpected empty chunk indicates that reading failed before EOF.
-        if(chunk.isEmpty()) {
-            if(file.atEnd()) {
-                break;
-            }
-
-            qDebug() << "Failed while reading source file:" << file.errorString();
-            return false;
-        }
-
-        // Identify both the transfer and exact byte position represented by this chunk.
-        const Protocol::FileDataPayload fileData {
-            transfer.transferId,
-            offset,
-            chunk
+    // Reaching EOF means all file data has been queued and only FileComplete remains.
+    if(transfer.file->atEnd()) {
+        const Protocol::FileCompletePayload complete {
+            transfer.transferId
         };
 
-        // Stop immediately if the network layer cannot queue this chunk for transmission.
-        if(!connectionManager_->sendFileData(transfer.connection, fileData)) {
-            qDebug() << "Failed to send FileData chunk";
+        if(!connectionManager_->sendFileComplete(transfer.connection, complete)) {
             return false;
         }
 
-        // Advance the offset by the exact number of raw file bytes just sent.
-        offset += static_cast<std::uint64_t>(chunk.size());
-    }
-    // Tell the receiver that no more FileData messages will be sent for this transfer
-    const Protocol::FileCompletePayload complete { transfer.transferId };
+        transfer.file->close();
+        delete transfer.file;
+        transfer.file = nullptr;
 
-    if(!connectionManager_->sendFileComplete(transfer.connection, complete)) {
+        // The receiver still needs to acknowledge successful finalization.
+        emit outgoingTransferSent(transfer.transferId);
+        return true;
+    }
+
+    const QByteArray chunk = transfer.file->read(CHUNK_SIZE);
+
+    if(chunk.isEmpty()) {
+        qDebug() << "Failed while reading source file:"
+                 << transfer.file->errorString();
         return false;
     }
 
-    // Report that all file data and the completion message were successfully queued
-    emit outgoingTransferCompleted(transfer.transferId);
+    const Protocol::FileDataPayload fileData {
+        transfer.transferId,
+        transfer.bytesSent,
+        chunk
+    };
+
+    if(!connectionManager_->sendFileData(transfer.connection, fileData)) {
+        qDebug() << "Failed to send FileData chunk";
+        return false;
+    }
+
+    // Advance sender progress only after the complete chunk was queued successfully.
+    transfer.bytesSent += static_cast<std::uint64_t>(chunk.size());
+
+    emit outgoingTransferProgress(
+        transfer.transferId,
+        transfer.bytesSent,
+        transfer.fileSize
+    );
 
     return true;
 }

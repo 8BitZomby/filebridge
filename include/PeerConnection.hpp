@@ -60,6 +60,12 @@ class PeerConnection : public QObject {
          */
         void disconnected();
 
+        /**
+         * bytesWritten()
+         * Reports bytes removed from Qt's socket write buffer and handed to the operating system
+         */
+        void bytesWritten(qint64 bytes);
+
     private slots:
 
         /**
