@@ -6,7 +6,7 @@
 
 
 /**
- * Constructor: IncomingTransferWidget()
+ * Constructor: TransferWidget()
  * Constructs the visual row for one file transfer
  */
 TransferWidget::TransferWidget(const QString& fileName, std::uint64_t fileSize, QWidget *parent) 

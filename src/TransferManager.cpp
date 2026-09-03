@@ -134,7 +134,7 @@ std::optional<std::uint64_t> TransferManager::offerFile(PeerConnection *connecti
         return std::nullopt;
     }
 
-    // Allocate an identifier that wwill associate later protocol messages with this file
+    // Allocate an identifier that will associate later protocol messages with this file
     const std::uint64_t transferId = generateTransferId();
 
     // Build the metadata sent to the receiving peer before any file contents are transmitted

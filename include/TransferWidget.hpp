@@ -19,7 +19,7 @@ class TransferWidget : public QWidget {
     public:
 
         /**
-         * Constructor: IncomingTransferWidget()
+         * Constructor: TransferWidget()
          * Constructs the visual row for one file transfer
          */
         explicit TransferWidget(const QString& fileName, std::uint64_t fileSize, QWidget *parent = nullptr);

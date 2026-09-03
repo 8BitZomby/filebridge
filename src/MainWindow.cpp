@@ -1258,7 +1258,7 @@ void MainWindow::updateOutgoingTransferDisplay(QListWidgetItem *item) {
 
 /**
  * updateReceiveModeAttention()
- * Updates the Receive selector text and attention styling from pending incoming offers
+ * Updates the Receive selector text and attention styling from active incoming transfers
  */
 void MainWindow::updateReceiveModeAttention() {
     int activeCount = 0;

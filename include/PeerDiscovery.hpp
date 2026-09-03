@@ -127,7 +127,7 @@ class PeerDiscovery : public QObject {
         // Time that periodically broadcasts this FileBridge instance
         QTimer announcementTimer_;
 
-        // Periodically checks known peers for expired discover heartbeats
+        // Periodically checks known peers for expired discovery heartbeats
         QTimer cleanupTimer_;
 
         // UDP socket used to receive FileBridge discovery broadcasts
@@ -160,7 +160,7 @@ class PeerDiscovery : public QObject {
 
         /**
          * broadcastAnnouncement()
-         * Sends this FileBridge instance discovery accouncement over the local network
+         * Sends this FileBridge instance discovery announcement over the local network
          */
         void broadcastAnnouncement();
 };

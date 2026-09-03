@@ -64,7 +64,7 @@ namespace Protocol {
      * Contains the information exchanged when two FileBridge peers first connect
      */
     struct HandshakePayload {
-        // FileBridge wire-protocol version used to verify peero compatibility
+        // FileBridge wire-protocol version used to verify peer compatibility
         std::uint16_t protocolVersion;
 
         // FileBridge application version reported by the remote peer

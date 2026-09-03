@@ -245,7 +245,7 @@ class MainWindow : public QMainWindow {
 
         /**
          * updateReceiveModeAttention()
-         * Updates the Receive selector text and attention styling from pending incoming offers
+         * Updates the Receive selector text and attention styling from active incoming transfers
          */
         void updateReceiveModeAttention();
 

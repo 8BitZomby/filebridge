@@ -289,7 +289,7 @@ bool ConnectionManager::sendFileData(PeerConnection *connection, const Protocol:
  * Sends completion for one finished outgoing file transfer
  */
 bool ConnectionManager::sendFileComplete(PeerConnection *connection, const Protocol::FileCompletePayload& complete) {
-    // Locate the managed state for the peer that should receive the completeion message
+    // Locate the managed state for the peer that should receive the completion message
     const auto peer = std::find_if(
         connections_.begin(),
         connections_.end(),
@@ -543,7 +543,7 @@ void ConnectionManager::handleMessage(PeerConnection *connection, const Protocol
 
             Protocol::HandshakePayload handshake;
 
-            // Reject malformed handshake payloads before using peer-probided information
+            // Reject malformed handshake payloads before using peer-provided information
             if(!Protocol::deserializeHandshakePayload(message.payload, handshake)) {
                 qDebug() << "Invalid handshake payload";
                 connection->disconnectFromPeer();

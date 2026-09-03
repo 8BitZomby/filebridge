@@ -54,7 +54,7 @@ class TransferManager : public QObject {
             // Total file size in bytes.
             std::uint64_t fileSize;
 
-            // Number of file bytes sucessfully received for this transfer so far
+            // Number of file bytes successfully received for this transfer so far
             std::uint64_t bytesReceived;
 
             // Current lifecycle stage while this incoming transfer remains tracked.
@@ -196,7 +196,7 @@ class TransferManager : public QObject {
         void handleFileDataReceived(PeerConnection *connection, const Protocol::FileDataPayload& fileData);
 
         /**
-         * handleFileompleteReceived()
+         * handleFileCompleteReceived()
          * Finalizes an incoming transfer after the sender reports completion
          */
         void handleFileCompleteReceived(PeerConnection *connection, const Protocol::FileCompletePayload& complete);
@@ -286,7 +286,7 @@ class TransferManager : public QObject {
          * Builds an unused destination path by adding " (n)" before the file extension
          * when needed
          */
-        QString createUniqueDestinationPath(const QString& direectory, const QString& fileName) const;
+        QString createUniqueDestinationPath(const QString& directory, const QString& fileName) const;
 
         /**
          * generateTransferId()
@@ -312,7 +312,7 @@ class TransferManager : public QObject {
         // Holds accepted outgoing transfers waiting for the current transfer to finish
         std::unordered_map<PeerConnection *, std::deque<std::uint64_t>> queuedOutgoingTransfers_;
 
-        // Tracks pending incoming transfers by their sender-assigned transfer identifier.
+        // Tracks active incoming transfers by their sender-assigned transfer identifier
         std::unordered_map<std::uint64_t, IncomingTransfer> incomingTransfers_;
 };
 

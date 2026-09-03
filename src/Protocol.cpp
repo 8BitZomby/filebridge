@@ -573,10 +573,10 @@ Protocol::Message Protocol::makeFileDataMessage(const FileDataPayload &fileData)
 
 /** 
  * makeFileCompleteMessage()
- * BUilds a complete FileComplete message for a finished transfer
+ * Builds a complete FileComplete message for a finished transfer
  */
 Protocol::Message Protocol::makeFileCompleteMessage(const FileCompletePayload &complete) {
-    // Econde the FileComplete-specific transfer identifier into payload bytes
+    // Encode the FileComplete-specific transfer identifier into payload bytes
     const QByteArray payload = serializeFileCompletePayload(complete);
 
     // Aggregate initialization equivalent to:

@@ -46,7 +46,7 @@ PeerDiscovery::PeerDiscovery(std::uint16_t listeningPort, QObject *parent)
  * Starts listening for FileBridge discovery broadcasts
  */
 bool PeerDiscovery::start() {
-    // Avoid binding the dicovery socket more than once
+    // Avoid binding the discovery socket more than once
     if(isRunning()) {
         return true;
     }
@@ -56,7 +56,7 @@ bool PeerDiscovery::start() {
     const bool bound = socket_.bind(
         QHostAddress::AnyIPv4,                              // Address: Listen for IPv4 datagrams on all local network interfaces
         DISCOVERY_PORT,                                     // Port: Fixed shared UDP port used by FileBridge peer discovery
-        QUdpSocket::ShareAddress | QUdpSocket::ReuseAddressHint // MODE: Allow multiply FB instances to share discovery port
+        QUdpSocket::ShareAddress | QUdpSocket::ReuseAddressHint // MODE: Allow multiple FileBridge instances to share discovery port
     );
 
     if(!bound) {
@@ -72,7 +72,7 @@ bool PeerDiscovery::start() {
 
     // Process discovery datagrams whenever the UDP socket receives data
     QObject::connect(
-        &socket_,                           // Sender: USP socket receiving discovery datagrams
+        &socket_,                           // Sender: UDP socket receiving discovery datagrams
         &QUdpSocket::readyRead,              // Signal: Emitted when one or more datagrams are available
         this,                               // Receiver: This PeerDiscovery instance
         &PeerDiscovery::handleReadyRead     // Slot: Read and processes the pending datagrams
@@ -102,7 +102,7 @@ void PeerDiscovery::stop() {
     // Stop checking for expired peers while discovery is inactive
     cleanupTimer_.stop();
 
-    // Leave the multicast group before closing the USP socket
+    // Leave the multicast group before closing the UDP socket
     if(socket_.state() != QAbstractSocket::UnconnectedState) {
         socket_.leaveMulticastGroup(DISCOVERY_MULTICAST_GROUP);
     }
@@ -293,7 +293,7 @@ void PeerDiscovery::broadcastAnnouncement() {
     // Encode the announcement using FileBridge's defined discovery wire format
     const QByteArray data = serializeAnnouncement(announcement);
 
-    // Broadcast the accouncement to FileBridge instances listening on the local network
+    // Broadcast the announcement to FileBridge instances listening on the local network
     socket_.writeDatagram(
         data,                       // Data: Serialized FileBridge discovery announcement
         DISCOVERY_MULTICAST_GROUP,  // Address: Mulitcast group joined by nearby FileBridge instances

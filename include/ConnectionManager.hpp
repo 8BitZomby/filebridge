@@ -60,7 +60,7 @@ class ConnectionManager : public QObject {
 
         /**
          * sendFileOffer()
-         * Sends matadata for one proposed file transfer to a ready peer
+         * Sends metadata for one proposed file transfer to a ready peer
          */
         bool sendFileOffer(PeerConnection *connection, const Protocol::FileOfferPayload& offer);
 
@@ -130,7 +130,7 @@ class ConnectionManager : public QObject {
 
         /**
          * fileOfferReceived()
-         * Reports file matadata offered by a connectied and validated peer
+         * Reports file metadata offered by a connected and validated peer
          */
         void fileOfferReceived(PeerConnection *connection, const Protocol::FileOfferPayload& offer);
 
