@@ -22,12 +22,23 @@ class TransferManager : public QObject {
     Q_OBJECT
 
     public:
+        
+        /**
+         * IncomingTransferState
+         * Identifies the current lifecycle stage of a tracked incoming transfer.
+         */
+        enum class IncomingTransferState : int {
+            Pending = 0,
+            Accepted = 1,
+            Receiving = 2
+        };
 
         /**
          * IncomingTransfer
          * Stores metadata and receive state for a file offered by a remote peer.
          */
         struct IncomingTransfer {
+
             // Unique identifier assigned by the sending peer.
             std::uint64_t transferId;
 
@@ -37,11 +48,17 @@ class TransferManager : public QObject {
             // Full local filesystem path where received file data will be written
             QString destinationPath;
 
+            // Open destination file owned by this transfer after it is accepted.
+            QFile *destinationFile;
+
             // Total file size in bytes.
             std::uint64_t fileSize;
 
             // Number of file bytes sucessfully received for this transfer so far
             std::uint64_t bytesReceived;
+
+            // Current lifecycle stage while this incoming transfer remains tracked.
+            IncomingTransferState state;
 
             // Peer that offered the file.
             PeerConnection *connection;
@@ -245,6 +262,12 @@ class TransferManager : public QObject {
          * Reports a local incoming-transfer failure to both the remote peer and the GUI
          */
         void failIncomingTransfer(std::uint64_t transferId, Protocol::TransferErrorCode errorCode, const QString& errorMessage);
+
+        /**
+         * failOutgoingTransfer()
+         * Cleans up a failed outgoing transfer, updates the GUI, and advances its peer queue.
+         */
+        void failOutgoingTransfer(std::uint64_t transferId, const QString& errorMessage, bool notifyPeer);
 
         /**
          * startNextQueuedOutgoingTransfer()

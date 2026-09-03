@@ -1,5 +1,7 @@
 #include "TransferWidget.hpp"
 
+#include "FileSizeFormatter.hpp"
+
 #include <QString>
 
 
@@ -17,12 +19,12 @@ TransferWidget::TransferWidget(const QString& fileName, std::uint64_t fileSize, 
     layout->setContentsMargins(4, 2, 4, 2);
     layout->setSpacing(2);
 
-    // Start with the transfer in a simple pending state.
+    // Start with the transfer in a simple pending state using a human-readable file size.
     statusLabel_->setText(
         fileName +
         "    " +
-        QString::number(fileSize) +
-        " bytes    Pending"
+        formatFileSize(fileSize) +
+        "    Pending"
     );
 
     progressBar_->setRange(0, 100);

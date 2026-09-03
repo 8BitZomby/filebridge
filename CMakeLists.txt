@@ -32,6 +32,7 @@ qt_standard_project_setup()
 # Create the FileBridge executable and list every source file that belongs to it.
 qt_add_executable(fb
     include/ConnectionManager.hpp
+    include/FileSizeFormatter.hpp
     include/TransferWidget.hpp
     include/MainWindow.hpp
     include/NetworkInfo.hpp
@@ -43,6 +44,7 @@ qt_add_executable(fb
     include/TransferManager.hpp
     src/main.cpp
     src/ConnectionManager.cpp
+    src/FileSizeFormatter.cpp
     src/TransferWidget.cpp
     src/MainWindow.cpp
     src/NetworkInfo.cpp

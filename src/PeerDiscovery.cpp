@@ -33,6 +33,9 @@ PeerDiscovery::PeerDiscovery(std::uint16_t listeningPort, QObject *parent)
         &PeerDiscovery::removeExpiredPeers      // Slot: Removes peers whose last heartbeat is too old.
     );
 
+    // Advertise this FileBridge instance at the configured discovery interval.
+    announcementTimer_.setInterval(ANNOUNCEMENT_INTERVAL_MS);
+
     // Check for expired peers once per second.
     cleanupTimer_.setInterval(1000);
 }

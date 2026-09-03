@@ -1,6 +1,7 @@
 #include "MainWindow.hpp"
 
 #include "ConnectionManager.hpp"
+#include "FileSizeFormatter.hpp"
 #include "TransferWidget.hpp"
 #include "NetworkInfo.hpp"
 #include "PeerDiscovery.hpp"
@@ -106,8 +107,14 @@ MainWindow::MainWindow(QWidget *parent) :
         transferModeButtonGroup_->addButton(sendModeButton_);
         transferModeButtonGroup_->addButton(receiveModeButton_);
 
+
+
         // FileBridge starts on the outgoing-file page
         sendModeButton_->setChecked(true);
+
+        // Keep the active page selector visually pressed so Send/Receive reads
+        // as navigation rather than as a pair of transfer action buttons.
+        sendModeButton_->setDown(true);
 
         // Allow several queued files to be selected and removed together
         outgoingFilesList_->setSelectionMode(QAbstractItemView::ExtendedSelection);
@@ -688,6 +695,10 @@ void MainWindow::handleSendModeClicked() {
     // The Send page is the first page added to transferStack_ in the constructor.
     transferStack_->setCurrentIndex(0);
 
+    // Keep only the visible page's selector visually pressed.
+    sendModeButton_->setDown(true);
+    receiveModeButton_->setDown(false);
+
     // Pending incoming offers require attention again while the Receive page is hidden.
     updateReceiveModeAttention();
 }
@@ -700,6 +711,10 @@ void MainWindow::handleSendModeClicked() {
 void MainWindow::handleReceiveModeClicked() {
     // The Receive page is the second page added to transferStack_ in the constructor.
     transferStack_->setCurrentIndex(1);
+
+    // Keep only the visible page's selector visually pressed.
+    sendModeButton_->setDown(false);
+    receiveModeButton_->setDown(true);
 
     // Viewing the Receive page clears the attention appearance but preserves the pending count.
     updateReceiveModeAttention();
@@ -1314,8 +1329,8 @@ void MainWindow::handleOutgoingTransferOffered(std::uint64_t transferId, const Q
         "Offered: " +
         fileName +
         " (" +
-        QString::number(fileSize) +
-        " bytes)"
+        formatFileSize(fileSize) +
+        ")"
     );
 }
 
@@ -1701,8 +1716,8 @@ void MainWindow::handleIncomingTransferOffered(const TransferManager::IncomingTr
             "Receiving: " +
             transfer.fileName +
             " (" +
-            QString::number(transfer.fileSize) +
-            " bytes)"
+            formatFileSize(transfer.fileSize) +
+            ")"
         );
 
         return;
@@ -1715,8 +1730,8 @@ void MainWindow::handleIncomingTransferOffered(const TransferManager::IncomingTr
         "Incoming offer: " +
         transfer.fileName +
         " (" +
-        QString::number(transfer.fileSize) +
-        " bytes)"
+        formatFileSize(transfer.fileSize) +
+        ")"
     );
 }
 

@@ -523,7 +523,8 @@ void ConnectionManager::handleMessage(PeerConnection *connection, const Protocol
         message.header.type == Protocol::MessageType::FileReject ||
         message.header.type == Protocol::MessageType::FileData ||
         message.header.type == Protocol::MessageType::FileComplete ||
-        message.header.type == Protocol::MessageType::FileCompleteAck;
+        message.header.type == Protocol::MessageType::FileCompleteAck ||
+        message.header.type == Protocol::MessageType::Error;
 
     if(isTransferMessage && !peer->approved) {
         qDebug() << "Received transfer message before connection approval";
