@@ -26,3 +26,16 @@ jobs:
 
       - name: Build
         run: cmake --build build --config Release --parallel
+
+      - name: Deploy Windows application
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force package
+          Copy-Item build/Release/fb.exe package/FileBridge.exe
+          windeployqt --release --no-translations --compiler-runtime package/FileBridge.exe
+
+      - name: Upload Windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: FileBridge-Windows-x64
+          path: package/

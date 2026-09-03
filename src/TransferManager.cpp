@@ -311,14 +311,59 @@ void TransferManager::handleFileOfferReceived(PeerConnection *connection, const 
 
     // Remote peers may provide only a plain filename, never a path. Reject
     // directory components so received files cannot escape the chosen destination.
-    if(
+    bool unsafeFileName =
         offer.fileName.isEmpty() ||
         offer.fileName == "." ||
         offer.fileName == ".." ||
         offer.fileName.contains('/') ||
         offer.fileName.contains('\\') ||
-        QDir::isAbsolutePath(offer.fileName)
+        QDir::isAbsolutePath(offer.fileName);
+
+#ifdef Q_OS_WIN
+    // Windows forbids several filename characters and ASCII control characters.
+    static constexpr QStringView WINDOWS_FORBIDDEN_CHARACTERS = u"<>:\"|?*";
+
+    for(const QChar character : offer.fileName) {
+        if(
+            WINDOWS_FORBIDDEN_CHARACTERS.contains(character) ||
+            character.unicode() < 32
+        ) {
+            unsafeFileName = true;
+            break;
+        }
+    }
+
+    // Windows does not permit filenames ending in a space or period.
+    if(
+        offer.fileName.endsWith(' ') ||
+        offer.fileName.endsWith('.')
     ) {
+        unsafeFileName = true;
+    }
+
+    // Windows reserves device names even when an extension is present, such as CON.txt.
+    const QString deviceName =
+        offer.fileName.section('.', 0, 0).toUpper();
+
+    if(
+        deviceName == "CON" ||
+        deviceName == "PRN" ||
+        deviceName == "AUX" ||
+        deviceName == "NUL" ||
+        (deviceName.startsWith("COM") &&
+         deviceName.size() == 4 &&
+         deviceName.at(3) >= '1' &&
+         deviceName.at(3) <= '9') ||
+        (deviceName.startsWith("LPT") &&
+         deviceName.size() == 4 &&
+         deviceName.at(3) >= '1' &&
+         deviceName.at(3) <= '9')
+    ) {
+        unsafeFileName = true;
+    }
+#endif
+
+    if(unsafeFileName) {
         qDebug() << "FileOffer rejected: unsafe filename" << offer.fileName;
 
         const Protocol::FileRejectPayload reject {

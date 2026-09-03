@@ -73,3 +73,10 @@ if(APPLE)
         MACOSX_BUNDLE ON
     )
 endif()
+
+# Build a normal Windows GUI executable without opening a console window.
+if(WIN32)
+    set_target_properties(fb PROPERTIES
+        WIN32_EXECUTABLE ON
+    )
+endif()
