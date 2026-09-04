@@ -8,17 +8,20 @@
 #include "Protocol.hpp"
 
 #include <QApplication>
-#include <QCheckBox>
 #include <QDialog>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFrame>
 #include <QGridLayout>
+#include <QGraphicsDropShadowEffect>
 #include <QHBoxLayout>
+#include <QGroupBox>
 #include <QHostAddress>
 #include <QIntValidator>
 #include <QLabel>
 #include <QProgressBar>
+#include <QPainter>
+#include <QPixmap>
 #include <QStandardPaths>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -35,13 +38,21 @@ MainWindow::MainWindow(QWidget *parent) :
     peerDiscovery_(nullptr),
     transferManager_(&connectionManager_, this),
     activePeer_(nullptr),
-    autoAcceptIncomingTransfers_(false),
+    connectionOrigin_(ConnectionOrigin::None),
     outgoingQueueSending_(false),
     connectionInfoButton_(new QToolButton(this)),
+    connectionStateIcon_(new QLabel(this)),
     nearbyDevicesList_(new QListWidget(this)),
+    connectionModeButtonGroup_(new QButtonGroup(this)),
+    devicesModeButton_(new QPushButton("Devices", this)),
+    directModeButton_(new QPushButton("Direct", this)),
+    connectionStack_(new QStackedWidget(this)),
+    directInputWidget_(new QWidget(this)),
+    directAddressEdit_(new QLineEdit(this)),
+    directPortEdit_(new QLineEdit(this)),
+    directStatusLabel_(new QLabel(this)),
     connectButton_(new QPushButton("Connect", this)),
     disconnectButton_(new QPushButton("Disconnect", this)),
-    manualConnectionButton_(new QPushButton("Manual", this)),
     transferModeButtonGroup_(new QButtonGroup(this)),
     sendModeButton_(new QPushButton("Send", this)),
     receiveModeButton_(new QPushButton("Receive", this)),
@@ -90,14 +101,98 @@ MainWindow::MainWindow(QWidget *parent) :
             }
         }
 
-        // Make the connection-information control a small, unobtrusive square
+        // Style the connection-information control as a compact circular utility
+        // button so it remains secondary without looking like an unstyled widget.
         connectionInfoButton_->setText("i");
-        connectionInfoButton_->setAutoRaise(true);
-        connectionInfoButton_->setFixedSize(20, 20);
+        connectionInfoButton_->setAutoRaise(false);
+        connectionInfoButton_->setFixedSize(24, 24);
         connectionInfoButton_->setToolTip("Show connection information");
 
+        // Keep the Direct-only control in the header layout so the centered
+        // mode selector never shifts when switching connection modes.
+        connectionInfoButton_->setEnabled(false);
+
+        connectionInfoButton_->setStyleSheet(
+            "QToolButton {"
+            "background-color: #f4f4f5;"
+            "color: #6b6f75;"
+            "border: 1px solid #b8bbc0;"
+            "border-radius: 12px;"
+            "font-size: 14px;"
+            "font-weight: 600;"
+            "}"
+            "QToolButton:hover {"
+            "background-color: #ffffff;"
+            "}"
+            "QToolButton:pressed {"
+            "background-color: #d7d8da;"
+            "}"
+        );
+
+        // FileBridge starts in Devices mode, so hide the control visually while
+        // preserving its fixed layout footprint.
+        connectionInfoButton_->setStyleSheet(
+            "QToolButton {"
+            "background-color: transparent;"
+            "color: transparent;"
+            "border: 1px solid transparent;"
+            "border-radius: 12px;"
+            "}"
+        );
+
         // Make nearby devices list small but scrollable if more devices show up
-        nearbyDevicesList_->setMaximumHeight(50);
+        nearbyDevicesList_->setMaximumHeight(70);
+
+        // Initialize the shared indicator using the same drawing path that
+        // later connection lifecycle changes will use.
+        updateConnectionStateIcon(false);
+
+        // The Devices and Direct buttons behave as one exclusive connection-mode selector.
+        devicesModeButton_->setCheckable(true);
+        directModeButton_->setCheckable(true);
+        connectionModeButtonGroup_->setExclusive(true);
+
+        connectionModeButtonGroup_->addButton(devicesModeButton_);
+        connectionModeButtonGroup_->addButton(directModeButton_);
+
+        // Use the largest natural selector size for every mode button so the
+        // navigation controls remain identical regardless of their label text.
+        QSize modeButtonSize = devicesModeButton_->sizeHint();
+
+        modeButtonSize = modeButtonSize.expandedTo(directModeButton_->sizeHint());
+        modeButtonSize = modeButtonSize.expandedTo(sendModeButton_->sizeHint());
+        modeButtonSize = modeButtonSize.expandedTo(receiveModeButton_->sizeHint());
+
+        devicesModeButton_->setFixedSize(modeButtonSize);
+        directModeButton_->setFixedSize(modeButtonSize);
+        sendModeButton_->setFixedSize(modeButtonSize);
+        receiveModeButton_->setFixedSize(modeButtonSize);
+
+        // FileBridge starts on the automatically discovered Devices page.
+        devicesModeButton_->setChecked(true);
+
+        // Keep the active connection selector visually pressed so Devices/Direct reads
+        // as navigation rather than as a pair of connection action buttons.
+        devicesModeButton_->setDown(true);
+
+        // Guide direct connections toward an IPv4 address while still validating the
+        // final value with QHostAddress before any network operation begins.
+        directAddressEdit_->setPlaceholderText("192.168.0.10");
+
+        // Restrict direct port input to the complete valid TCP port-number range.
+        directPortEdit_->setPlaceholderText("Port");
+        directPortEdit_->setValidator(
+            new QIntValidator(
+                1,                  // bottom: Lowest TCP port accepted by FileBridge.
+                65535,              // top: Highest possible TCP port.
+                directPortEdit_     // parent: The line edit owns and destroys its validator.
+            )
+        );
+
+        // Reserve one line for Direct connection state at all times so the
+        // Connect and Disconnect buttons never move when status text appears.
+        directStatusLabel_->setMinimumHeight(directStatusLabel_->fontMetrics().height());
+        directStatusLabel_->clear();
 
         // The two transfer-mode buttons behave as one exclusive Send/Receive selector
         sendModeButton_->setCheckable(true);
@@ -143,6 +238,22 @@ MainWindow::MainWindow(QWidget *parent) :
             &MainWindow::handleConnectionInfoClicked        // Slot: Opens the local address and port dialog.
         );
 
+        // Display the automatically discovered-device page when Devices is selected.
+        QObject::connect(
+            devicesModeButton_,                             // Sender: Devices connection-mode selector.
+            &QPushButton::clicked,                          // Signal: Emitted when the user selects Devices.
+            this,                                           // Receiver: This MainWindow instance.
+            &MainWindow::handleDevicesModeClicked           // Slot: Displays the Devices connection page.
+        );
+
+        // Display the direct endpoint page when Direct is selected.
+        QObject::connect(
+            directModeButton_,                              // Sender: Direct connection-mode selector.
+            &QPushButton::clicked,                          // Signal: Emitted when the user selects Direct.
+            this,                                           // Receiver: This MainWindow instance.
+            &MainWindow::handleDirectModeClicked            // Slot: Displays the Direct connection page.
+        );
+
         // Start an outgoing connection when the user presses the Connect button
         QObject::connect(
             connectButton_,                                 // Button that emits the signal
@@ -157,14 +268,6 @@ MainWindow::MainWindow(QWidget *parent) :
             &QPushButton::clicked,                          // Signal: Emitted when the user clicks Disconnect.
             this,                                           // Receiver: This MainWindow instance.
             &MainWindow::handleDisconnectClicked            // Slot: Requests disconnection of the active peer.
-        );
-
-        // Open the fallback dialog for connecting directly by IP address and port.
-        QObject::connect(
-            manualConnectionButton_,                        // Sender: Manual connection button.
-            &QPushButton::clicked,                          // Signal: Emitted when the user clicks Manual.
-            this,                                           // Receiver: This MainWindow instance.
-            &MainWindow::handleManualConnectionClicked      // Slot: Opens the manual connection dialog.
         );
 
         // Start a connection request when the user double-clicks a discovered device.
@@ -367,74 +470,676 @@ MainWindow::MainWindow(QWidget *parent) :
             &MainWindow::handleOutgoingTransferSent     // Slot: Shows Sent while awaiting receiver confirmation.
         );
 
-        // Use a central widget because QMainWindow reserves its outer structure for menus and toolbars
+        // Use a central widget because QMainWindow reserves its outer structure for menus and toolbars.
         QWidget *centralWidget = new QWidget(this);
         QVBoxLayout *layout = new QVBoxLayout(centralWidget);
 
-        // Keep the section title and connection-info control on the same row
-        QHBoxLayout *nearbyHeaderLayout = new QHBoxLayout();
-        nearbyHeaderLayout->addWidget(new QLabel("Nearby devices:", centralWidget));
-        nearbyHeaderLayout->addStretch();
-        nearbyHeaderLayout->addWidget(connectionInfoButton_);
-        layout->addLayout(nearbyHeaderLayout);
-        layout->addWidget(nearbyDevicesList_);
+        // Keep the two major areas visually separate while using QGroupBox titles
+        // so each section heading remains integrated with its surrounding border.
+        QGroupBox *connectionGroup = new QGroupBox("Connection", centralWidget);
+        QGroupBox *transferGroup = new QGroupBox("Transfers", centralWidget);
 
-        // Group all peer-connection actions together on one row
-        QHBoxLayout *connectionButtonLayout = new QHBoxLayout();
-        connectionButtonLayout->addWidget(connectButton_);
-        connectionButtonLayout->addWidget(disconnectButton_);
-        connectionButtonLayout->addWidget(manualConnectionButton_);
+        // Add a restrained shadow beneath each primary panel so the lighter
+        // work areas sit slightly above the surrounding background.
+        QGraphicsDropShadowEffect *connectionShadow =
+            new QGraphicsDropShadowEffect(connectionGroup);
+
+        connectionShadow->setBlurRadius(20.0);
+        connectionShadow->setOffset(0.0, 4.0);
+        connectionShadow->setColor(QColor(0, 0, 0, 55));
+
+        QGraphicsDropShadowEffect *transferShadow =
+            new QGraphicsDropShadowEffect(transferGroup);
+
+        transferShadow->setBlurRadius(20.0);
+        transferShadow->setOffset(0.0, 4.0);
+        transferShadow->setColor(QColor(0, 0, 0, 55));
+
+        // QWidget takes ownership of the graphics effect assigned to it.
+        connectionGroup->setGraphicsEffect(connectionShadow);
+        transferGroup->setGraphicsEffect(transferShadow);
+
+        // Give clickable push buttons a smaller, softer shadow than the main
+        // panels so controls appear slightly raised without competing with them.
+        const auto addButtonShadow = [](QWidget *button) {
+            QGraphicsDropShadowEffect *shadow = new QGraphicsDropShadowEffect(button);
+            shadow->setBlurRadius(10.0);
+            shadow->setOffset(0.0, 2.0);
+            shadow->setColor(QColor(0, 0, 0, 35));
+
+            // The button takes ownership of its assigned graphics effect.
+            button->setGraphicsEffect(shadow);
+        };
+
+        addButtonShadow(connectionInfoButton_);
+        addButtonShadow(devicesModeButton_);
+        addButtonShadow(directModeButton_);
+        addButtonShadow(connectButton_);
+        addButtonShadow(disconnectButton_);
+
+        addButtonShadow(sendModeButton_);
+        addButtonShadow(receiveModeButton_);
+
+        // Give the four mode selectors a stronger shadow so their raised state
+        // remains visible across both their selected and unselected appearances.
+        const auto addModeButtonShadow = [](QWidget *button) {
+            QGraphicsDropShadowEffect *shadow =
+                new QGraphicsDropShadowEffect(button);
+
+            shadow->setBlurRadius(16.0);
+            shadow->setOffset(0.0, 3.0);
+            shadow->setColor(QColor(0, 0, 0, 65));
+
+            // Assigning this effect replaces the softer general button shadow.
+            button->setGraphicsEffect(shadow);
+        };
+
+        addModeButtonShadow(devicesModeButton_);
+        addModeButtonShadow(directModeButton_);
+        addModeButtonShadow(sendModeButton_);
+        addModeButtonShadow(receiveModeButton_);
+
+        addButtonShadow(addFilesButton_);
+        addButtonShadow(removeSelectedFilesButton_);
+        addButtonShadow(sendFilesButton_);
+
+        addButtonShadow(acceptTransferButton_);
+        addButtonShadow(rejectTransferButton_);
+        addButtonShadow(removeSelectedIncomingButton_);
+
+        // Give list and direct-entry surfaces a very soft shadow so the white
+        // content areas sit slightly above the surrounding panel background.
+        const auto addContentShadow = [](QWidget *widget) {
+            QGraphicsDropShadowEffect *shadow =
+                new QGraphicsDropShadowEffect(widget);
+
+            shadow->setBlurRadius(12.0);
+            shadow->setOffset(0.0, 2.0);
+            shadow->setColor(QColor(0, 0, 0, 28));
+
+            // The widget takes ownership of its assigned graphics effect.
+            widget->setGraphicsEffect(shadow);
+        };
+
+        addContentShadow(outgoingFilesList_);
+        addContentShadow(incomingFilesList_);
+        addContentShadow(directAddressEdit_);
+        addContentShadow(directPortEdit_);
+
+        QVBoxLayout *connectionGroupLayout = new QVBoxLayout(connectionGroup);
+        QVBoxLayout *transferGroupLayout = new QVBoxLayout(transferGroup);
+
+        // Use a dark neutral background so the lighter Connection and Transfers
+        // panels stand apart clearly from the main application surface.
+        centralWidget->setObjectName("fileBridgeCentral");
+        centralWidget->setStyleSheet(
+            "QWidget#fileBridgeCentral {"
+            "background-color: #d8dadd;"
+            "}"
+        );
+
+        // Give both primary work areas a light gray surface with a stronger
+        // heading and restrained border while preserving the native system font.
+        const QString panelStyle =
+            "QGroupBox {"
+            "background-color: #e7e8ea;"
+            "border: 1px solid #aeb2b8;"
+            "border-radius: 10px;"
+            "margin-top: 16px;"
+            "font-size: 20px;"
+            "font-weight: 600;"
+            "color: #202124;"
+            "}"
+            "QGroupBox::title {"
+            "subcontrol-origin: margin;"
+            "subcontrol-position: top left;"
+            "left: 14px;"
+            "padding: 0 8px;"
+            "color: #55585d;"
+            "}"
+            "QGroupBox QLabel, "
+            "QGroupBox QPushButton, "
+            "QGroupBox QListWidget, "
+            "QGroupBox QLineEdit {"
+            "font-family: \"Avenir Next\";"
+            "}";
+
+        connectionGroup->setStyleSheet(panelStyle);
+        transferGroup->setStyleSheet(panelStyle);
+
+        // Keep file and device lists as bright rounded content surfaces inside
+        // the surrounding gray panels, with a subtle shared selection state.
+        const QString listStyle =
+            "QListWidget {"
+            "background-color: #ffffff;"
+            "color: #202124;"
+            "border: 1px solid #b8bbc0;"
+            "border-radius: 8px;"
+            "}"
+            "QListWidget::item:selected {"
+            "background-color: #d7d8da;"
+            "color: #202124;"
+            "}";
+
+        nearbyDevicesList_->setStyleSheet(listStyle);
+        outgoingFilesList_->setStyleSheet(listStyle);
+        incomingFilesList_->setStyleSheet(listStyle);
+
+        // Use consistent spacing inside each section so related controls read
+        // as one unit rather than as unrelated rows.
+        connectionGroupLayout->setSpacing(10);
+        transferGroupLayout->setSpacing(8);
+
+        // Build a balanced three-column connection header. The invisible widget
+        // on the left matches the information button on the right so the
+        // Devices/Direct selector remains mathematically centered.
+        QGridLayout *connectionHeaderLayout = new QGridLayout();
+
+        QWidget *connectionHeaderSpacer = new QWidget(connectionGroup);
+        connectionHeaderSpacer->setFixedSize(connectionInfoButton_->size());
+
+        QHBoxLayout *connectionModeLayout = new QHBoxLayout();
+        connectionModeLayout->setContentsMargins(0, 0, 0, 0);
+
+        // Present Devices and Direct as two halves of one segmented selector
+        // rather than as independent action buttons.
+        QWidget *connectionModeSurface = new QWidget(connectionGroup);
+        QHBoxLayout *connectionModeSurfaceLayout = new QHBoxLayout(connectionModeSurface);
+
+        connectionModeSurfaceLayout->setContentsMargins(0, 0, 0, 0);
+        connectionModeSurfaceLayout->setSpacing(0);
+
+        // The left segment keeps only the outer-left corners rounded so the
+        // adjoining edge meets the Direct segment without a visual gap.
+        devicesModeButton_->setStyleSheet(
+            "QPushButton {"
+            "background-color: #d7d8da;"
+            "border: 1px solid #b8bbc0;"
+            "border-right: none;"
+            "border-top-left-radius: 8px;"
+            "border-bottom-left-radius: 8px;"
+            "border-top-right-radius: 0;"
+            "border-bottom-right-radius: 0;"
+            "}"
+            "QPushButton:checked {"
+            "background-color: #969696;"
+            "color: #ffffff;"
+            "}"
+        );
+
+        // The right segment mirrors the left one so the pair reads as a
+        // single control with one continuous outside edge.
+        directModeButton_->setStyleSheet(
+            "QPushButton {"
+            "background-color: #d7d8da;"
+            "border: 1px solid #b8bbc0;"
+            "border-top-left-radius: 0;"
+            "border-bottom-left-radius: 0;"
+            "border-top-right-radius: 8px;"
+            "border-bottom-right-radius: 8px;"
+            "}"
+            "QPushButton:checked {"
+            "background-color: #969696;"
+            "color: #ffffff;"
+            "}"
+        );
+
+        // Remove the two independent selector shadows because a segmented
+        // control should cast one shadow around its complete outside shape.
+        devicesModeButton_->setGraphicsEffect(nullptr);
+        directModeButton_->setGraphicsEffect(nullptr);
+
+        connectionModeSurfaceLayout->addWidget(devicesModeButton_);
+        connectionModeSurfaceLayout->addWidget(directModeButton_);
+
+        QGraphicsDropShadowEffect *connectionModeShadow =
+            new QGraphicsDropShadowEffect(connectionModeSurface);
+
+        connectionModeShadow->setBlurRadius(16.0);
+        connectionModeShadow->setOffset(0.0, 3.0);
+        connectionModeShadow->setColor(QColor(0, 0, 0, 65));
+
+        // The selector surface owns the shared shadow effect.
+        connectionModeSurface->setGraphicsEffect(connectionModeShadow);
+
+        connectionModeLayout->addStretch();
+        connectionModeLayout->addWidget(connectionModeSurface);
+        connectionModeLayout->addStretch();
+
+        connectionHeaderLayout->addWidget(
+            connectionHeaderSpacer,
+            0,
+            0,
+            Qt::AlignLeft
+        );
+
+        connectionHeaderLayout->addLayout(
+            connectionModeLayout,
+            0,
+            1
+        );
+
+        connectionHeaderLayout->addWidget(
+            connectionInfoButton_,
+            0,
+            2,
+            Qt::AlignRight
+        );
+
+        connectionHeaderLayout->setColumnStretch(1, 1);
+
+        connectionGroupLayout->addLayout(connectionHeaderLayout);
+
+        // Use one consistent secondary-heading style for labels that identify
+        // content fields inside both primary FileBridge sections.
+        const QString contentLabelStyle =
+            "font-size: 15px;"
+            "font-weight: 600;"
+            "color: #55585d;";
+
+        // Build the page used for devices FileBridge discovers automatically
+        // on the local network.
+        QWidget *devicesPage = new QWidget(connectionStack_);
+        QVBoxLayout *devicesPageLayout = new QVBoxLayout(devicesPage);
+
+        devicesPageLayout->setContentsMargins(0, 0, 0, 0);
         
-        layout->addLayout(connectionButtonLayout);
+        // Keep a small, deliberate gap between the Devices heading and its
+        // content surface instead of allowing them to visually crowd together.
+        devicesPageLayout->setSpacing(4);
 
-        // Keep Send and Receive together as a compact mode selector
+        QLabel *availableDevicesLabel = new QLabel("Available devices:", devicesPage);
+
+        availableDevicesLabel->setStyleSheet(contentLabelStyle);
+        devicesPageLayout->addWidget(availableDevicesLabel);
+
+        // Give the discovered-device surface transparent breathing room so its
+        // drop shadow can extend beyond the white list without being clipped.
+        QWidget *nearbyDevicesContainer = new QWidget(devicesPage);
+        QVBoxLayout *nearbyDevicesContainerLayout = new QVBoxLayout(nearbyDevicesContainer);
+
+        nearbyDevicesContainerLayout->setContentsMargins(8, 0, 8, 8);
+
+        // Keep the actual shadow attached to an inner surface while the outer
+        // container reserves the space needed for the blur to remain visible.
+        QWidget *nearbyDevicesSurface = new QWidget(nearbyDevicesContainer);
+        QGridLayout *nearbyDevicesSurfaceLayout = new QGridLayout(nearbyDevicesSurface);
+
+        nearbyDevicesSurfaceLayout->setContentsMargins(0, 0, 0, 0);
+        nearbyDevicesSurfaceLayout->addWidget(nearbyDevicesList_, 0, 0);
+
+        // Explain the empty state directly inside the list surface rather than
+        // leaving a blank white area that could look unfinished or broken.
+        QLabel *noDevicesLabel = new QLabel("No devices found", nearbyDevicesSurface);
+
+        noDevicesLabel->setAlignment(Qt::AlignCenter);
+        noDevicesLabel->setStyleSheet(
+            "color: #8a8e94;"
+        );
+
+        // The empty-state label is purely informational and must not block
+        // mouse interaction with the discovered-device list beneath it.
+        noDevicesLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
+        nearbyDevicesSurfaceLayout->addWidget(noDevicesLabel, 0, 0);
+
+        // Keep the empty-state message synchronized with the actual number of
+        // discovered devices without inserting artificial QListWidgetItems.
+        const auto updateDevicesEmptyState = [this, noDevicesLabel]() {
+            noDevicesLabel->setVisible(nearbyDevicesList_->count() == 0);
+        };
+
+        QObject::connect(
+            nearbyDevicesList_->model(),                    // Sender: Model backing the discovered-device list.
+            &QAbstractItemModel::rowsInserted,               // Signal: Emitted when a discovered device is added.
+            this,                                            // Receiver: This MainWindow instance.
+            updateDevicesEmptyState                          // Slot: Hides the empty-state message when necessary.
+        );
+
+        QObject::connect(
+            nearbyDevicesList_->model(),                    // Sender: Model backing the discovered-device list.
+            &QAbstractItemModel::rowsRemoved,                // Signal: Emitted when a discovered device is removed.
+            this,                                            // Receiver: This MainWindow instance.
+            updateDevicesEmptyState                          // Slot: Restores the empty-state message when necessary.
+        );
+
+        updateDevicesEmptyState();
+
+        QGraphicsDropShadowEffect *nearbyDevicesShadow = new QGraphicsDropShadowEffect(nearbyDevicesSurface);
+
+        nearbyDevicesShadow->setBlurRadius(12.0);
+        nearbyDevicesShadow->setOffset(0.0, 2.0);
+        nearbyDevicesShadow->setColor(QColor(0, 0, 0, 28));
+
+        // The inner surface owns the effect while the outer container provides
+        // transparent space around all four sides for the shadow to render.
+        nearbyDevicesSurface->setGraphicsEffect(nearbyDevicesShadow);
+
+        nearbyDevicesContainerLayout->addWidget(nearbyDevicesSurface);
+        devicesPageLayout->addWidget(nearbyDevicesContainer);
+
+        // Build the page used when the user wants to connect directly to a known
+        // IP address and TCP port instead of relying on LAN discovery.
+        QWidget *directPage = new QWidget(connectionStack_);
+        QVBoxLayout *directPageLayout = new QVBoxLayout(directPage);
+
+        directPageLayout->setContentsMargins(0, 0, 0, 0);
+
+        // Use the extra height imposed by the taller Devices page above the
+        // Direct form so the endpoint fields sit closer to the shared
+        // connection-state indicator and connection controls below.
+        directPageLayout->addStretch(1);
+
+        // Keep the complete Direct endpoint form inside one persistent widget.
+        QGridLayout *directInputLayout = new QGridLayout(directInputWidget_);
+
+        directInputLayout->setContentsMargins(0, 0, 8, 0);
+
+        // Spread the two endpoint rows across approximately the same vertical
+        // range as the enlarged Available devices surface on the Devices page.
+        directInputLayout->setVerticalSpacing(16);
+
+        QLabel *directAddressLabel = new QLabel("IP address:", directInputWidget_);
+        directAddressLabel->setStyleSheet(contentLabelStyle);
+
+        directInputLayout->addWidget(
+            directAddressLabel,
+            0,
+            0
+        );
+
+        directInputLayout->addWidget(
+            directAddressEdit_,
+            0,
+            1
+        );
+
+        QLabel *directPortLabel = new QLabel("Port:", directInputWidget_);
+        directPortLabel->setStyleSheet(contentLabelStyle);
+
+        directInputLayout->addWidget(
+            directPortLabel,
+            1,
+            0
+        );
+
+        directInputLayout->addWidget(
+            directPortEdit_,
+            1,
+            1
+        );
+
+        // Keep the endpoint form at its natural height so the preceding stretch
+        // can move the complete form toward the shared connection controls below.
+        directPageLayout->addWidget(
+            directInputWidget_,
+            0,
+            Qt::AlignBottom
+        );
+
+        // Raise the complete endpoint form slightly so the bottom of the Port
+        // field aligns with the enlarged Available devices surface.
+        directPageLayout->addSpacing(15);
+
+        // Both connection methods occupy the same region inside the Connection group.
+        connectionStack_->addWidget(devicesPage);
+        connectionStack_->addWidget(directPage);
+        connectionStack_->setCurrentWidget(devicesPage);
+
+        connectionGroupLayout->addWidget(connectionStack_);
+
+        // Keep the connection-state indicator in the shared connection area so
+        // Devices and Direct modes report status from the same visual location.
+        connectionGroupLayout->addWidget(
+            connectionStateIcon_,
+            0,
+            Qt::AlignHCenter
+        );
+
+        // Match the width proportions of the three transfer actions below:
+        // each connection button occupies one third of the usable row width,
+        // with equal outer margins centering the pair.
+        QHBoxLayout *connectionActionLayout = new QHBoxLayout();
+
+        connectionActionLayout->addStretch(1);
+        connectionActionLayout->addWidget(connectButton_, 2);
+        connectionActionLayout->addWidget(disconnectButton_, 2);
+        connectionActionLayout->addStretch(1);
+
+        connectionGroupLayout->addLayout(connectionActionLayout);
+
+        // Present the transfer selector as one joined control so Send/Receive
+        // visually matches the Devices/Direct selector above.
         QHBoxLayout *transferModeLayout = new QHBoxLayout();
+        transferModeLayout->setContentsMargins(0, 0, 0, 0);
+
+        // Present Send and Receive as two halves of one segmented selector so
+        // transfer mode matches the connection-mode control above.
+        QWidget *transferModeSurface = new QWidget(transferGroup);
+        QHBoxLayout *transferModeSurfaceLayout = new QHBoxLayout(transferModeSurface);
+
+        transferModeSurfaceLayout->setContentsMargins(0, 0, 0, 0);
+        transferModeSurfaceLayout->setSpacing(0);
+
+        // The left segment keeps only the outer-left corners rounded so the
+        // adjoining edge meets the Receive segment without a visual gap.
+        sendModeButton_->setStyleSheet(
+            "QPushButton {"
+            "background-color: #d7d8da;"
+            "border: 1px solid #b8bbc0;"
+            "border-right: none;"
+            "border-top-left-radius: 8px;"
+            "border-bottom-left-radius: 8px;"
+            "border-top-right-radius: 0;"
+            "border-bottom-right-radius: 0;"
+            "}"
+            "QPushButton:checked {"
+            "background-color: #969696;"
+            "color: #ffffff;"
+            "}"
+        );
+
+        // The right segment mirrors the left one so the pair reads as a
+        // single control with one continuous outside edge.
+        receiveModeButton_->setStyleSheet(
+            "QPushButton {"
+            "background-color: #d7d8da;"
+            "border: 1px solid #b8bbc0;"
+            "border-top-left-radius: 0;"
+            "border-bottom-left-radius: 0;"
+            "border-top-right-radius: 8px;"
+            "border-bottom-right-radius: 8px;"
+            "}"
+            "QPushButton:checked {"
+            "background-color: #969696;"
+            "color: #ffffff;"
+            "}"
+        );
+
+        // Remove the two independent selector shadows because the segmented
+        // control uses one shared shadow around the complete outside shape.
+        sendModeButton_->setGraphicsEffect(nullptr);
+        receiveModeButton_->setGraphicsEffect(nullptr);
+
+        transferModeSurfaceLayout->addWidget(sendModeButton_);
+        transferModeSurfaceLayout->addWidget(receiveModeButton_);
+
+        QGraphicsDropShadowEffect *transferModeShadow =
+            new QGraphicsDropShadowEffect(transferModeSurface);
+
+        transferModeShadow->setBlurRadius(16.0);
+        transferModeShadow->setOffset(0.0, 3.0);
+        transferModeShadow->setColor(QColor(0, 0, 0, 65));
+
+        // The selector surface owns the shared shadow effect.
+        transferModeSurface->setGraphicsEffect(transferModeShadow);
+
         transferModeLayout->addStretch();
-        transferModeLayout->addWidget(sendModeButton_);
-        transferModeLayout->addWidget(receiveModeButton_);
+        transferModeLayout->addWidget(transferModeSurface);
         transferModeLayout->addStretch();
 
-        // Built the outgoing-file page shown while Send mode is selected
-        layout->addLayout(transferModeLayout);
+        transferGroupLayout->addLayout(transferModeLayout);
 
-        // Build the outgoing-file page shown while Send mode is selected
+        // Build the outgoing-file page shown while Send mode is selected.
         QWidget *sendPage = new QWidget(transferStack_);
         QVBoxLayout *sendPageLayout = new QVBoxLayout(sendPage);
 
         sendPageLayout->setContentsMargins(0, 0, 0, 0);
-        sendPageLayout->addWidget(new QLabel("Files to send:", sendPage));
-        sendPageLayout->addWidget(outgoingFilesList_);
+
+        // Keep the heading and file surface together so their spacing matches
+        // the Available devices heading and list without affecting action buttons.
+        QVBoxLayout *sendContentLayout = new QVBoxLayout();
+
+        sendContentLayout->setContentsMargins(0, 0, 0, 0);
+        sendContentLayout->setSpacing(0);
+
+        QLabel *filesToSendLabel = new QLabel("Files to send:", sendPage);
+        filesToSendLabel->setStyleSheet(contentLabelStyle);
+
+        sendContentLayout->addWidget(filesToSendLabel);
+
+        // Match the visual gap between Available devices and its list surface.
+        sendContentLayout->addSpacing(6);
+
+        // Overlay an informational empty-state message without inserting a
+        // placeholder QListWidgetItem that would interfere with transfer logic.
+        QWidget *outgoingFilesSurface = new QWidget(sendPage);
+        QGridLayout *outgoingFilesSurfaceLayout = new QGridLayout(outgoingFilesSurface);
+
+        outgoingFilesSurfaceLayout->setContentsMargins(0, 0, 0, 0);
+        outgoingFilesSurfaceLayout->addWidget(outgoingFilesList_, 0, 0);
+
+        QLabel *noOutgoingFilesLabel = new QLabel("No files added", outgoingFilesSurface);
+
+        noOutgoingFilesLabel->setAlignment(Qt::AlignCenter);
+        noOutgoingFilesLabel->setStyleSheet(
+            "color: #8a8e94;"
+        );
+
+        // The empty-state label must not intercept mouse input intended for
+        // the outgoing-file list beneath it.
+        noOutgoingFilesLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
+        outgoingFilesSurfaceLayout->addWidget(noOutgoingFilesLabel, 0, 0);
+
+        // Keep the empty-state message synchronized with the actual outgoing
+        // queue without changing QListWidget's real item count.
+        const auto updateOutgoingEmptyState = [this, noOutgoingFilesLabel]() {
+            noOutgoingFilesLabel->setVisible(outgoingFilesList_->count() == 0);
+        };
+
+        QObject::connect(
+            outgoingFilesList_->model(),                    // Sender: Model backing the outgoing-file list.
+            &QAbstractItemModel::rowsInserted,               // Signal: Emitted when files are added to the queue.
+            this,                                            // Receiver: This MainWindow instance.
+            updateOutgoingEmptyState                         // Slot: Hides the empty-state message when necessary.
+        );
+
+        QObject::connect(
+            outgoingFilesList_->model(),                    // Sender: Model backing the outgoing-file list.
+            &QAbstractItemModel::rowsRemoved,                // Signal: Emitted when files are removed from the queue.
+            this,                                            // Receiver: This MainWindow instance.
+            updateOutgoingEmptyState                         // Slot: Restores the message when the queue becomes empty.
+        );
+
+        updateOutgoingEmptyState();
+
+        sendContentLayout->addWidget(outgoingFilesSurface);
+        sendPageLayout->addLayout(sendContentLayout);
 
         QHBoxLayout *transferButtonLayout = new QHBoxLayout();
-        transferButtonLayout->addWidget(addFilesButton_);
-        transferButtonLayout->addWidget(removeSelectedFilesButton_);
-        transferButtonLayout->addWidget(sendFilesButton_);
+
+        transferButtonLayout->addWidget(addFilesButton_, 1);
+        transferButtonLayout->addWidget(removeSelectedFilesButton_, 1);
+        transferButtonLayout->addWidget(sendFilesButton_, 1);
 
         sendPageLayout->addLayout(transferButtonLayout);
 
-        // Build the incoming-file page shown while Receive mode is selected
+        // Build the incoming-file page shown while Receive mode is selected.
         QWidget *receivePage = new QWidget(transferStack_);
         QVBoxLayout *receivePageLayout = new QVBoxLayout(receivePage);
 
         receivePageLayout->setContentsMargins(0, 0, 0, 0);
-        receivePageLayout->addWidget(new QLabel("Files to receive:", receivePage));
-        receivePageLayout->addWidget(incomingFilesList_);
 
-        // These existing buttons temporarily preserve the current one-offer approval path
+        // Keep the heading and file surface together so Receive uses the same
+        // heading-to-list spacing as Devices and Send without moving its buttons.
+        QVBoxLayout *receiveContentLayout = new QVBoxLayout();
+
+        receiveContentLayout->setContentsMargins(0, 0, 0, 0);
+        receiveContentLayout->setSpacing(0);
+
+        QLabel *filesToReceiveLabel = new QLabel("Files to receive:", receivePage);
+        filesToReceiveLabel->setStyleSheet(contentLabelStyle);
+
+        receiveContentLayout->addWidget(filesToReceiveLabel);
+
+        // Match the visual gap between Available devices and its list surface.
+        receiveContentLayout->addSpacing(6);
+
+        // Overlay an informational empty-state message without inserting a
+        // placeholder QListWidgetItem that would interfere with transfer logic.
+        QWidget *incomingFilesSurface = new QWidget(receivePage);
+        QGridLayout *incomingFilesSurfaceLayout = new QGridLayout(incomingFilesSurface);
+
+        incomingFilesSurfaceLayout->setContentsMargins(0, 0, 0, 0);
+        incomingFilesSurfaceLayout->addWidget(incomingFilesList_, 0, 0);
+
+        QLabel *noIncomingFilesLabel = new QLabel("No files received", incomingFilesSurface);
+
+        noIncomingFilesLabel->setAlignment(Qt::AlignCenter);
+        noIncomingFilesLabel->setStyleSheet(
+            "color: #8a8e94;"
+        );
+
+        // The empty-state label must not intercept mouse input intended for
+        // the incoming-file list beneath it.
+        noIncomingFilesLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
+        incomingFilesSurfaceLayout->addWidget(noIncomingFilesLabel, 0, 0);
+
+        // Keep the empty-state message synchronized with the actual incoming
+        // transfer list without changing QListWidget's real item count.
+        const auto updateIncomingEmptyState = [this, noIncomingFilesLabel]() {
+            noIncomingFilesLabel->setVisible(incomingFilesList_->count() == 0);
+        };
+
+        QObject::connect(
+            incomingFilesList_->model(),                    // Sender: Model backing the incoming-file list.
+            &QAbstractItemModel::rowsInserted,               // Signal: Emitted when incoming transfers are added.
+            this,                                            // Receiver: This MainWindow instance.
+            updateIncomingEmptyState                         // Slot: Hides the empty-state message when necessary.
+        );
+
+        QObject::connect(
+            incomingFilesList_->model(),                    // Sender: Model backing the incoming-file list.
+            &QAbstractItemModel::rowsRemoved,                // Signal: Emitted when incoming transfers are removed.
+            this,                                            // Receiver: This MainWindow instance.
+            updateIncomingEmptyState                         // Slot: Restores the message when the list becomes empty.
+        );
+
+        updateIncomingEmptyState();
+
+        receiveContentLayout->addWidget(incomingFilesSurface);
+        receivePageLayout->addLayout(receiveContentLayout);
+
+       // These existing buttons preserve explicit approval of incoming transfers.
         QHBoxLayout *incomingDecisionLayout = new QHBoxLayout();
+
         incomingDecisionLayout->addWidget(acceptTransferButton_);
         incomingDecisionLayout->addWidget(rejectTransferButton_);
         incomingDecisionLayout->addWidget(removeSelectedIncomingButton_);
 
         receivePageLayout->addLayout(incomingDecisionLayout);
 
-        // QStackedWidget keeps both transfer pages in the same fixed region and displays
-        // at one time
+        // QStackedWidget keeps both transfer pages in one fixed region while only
+        // the currently selected Send or Receive page is visible.
         transferStack_->addWidget(sendPage);
         transferStack_->addWidget(receivePage);
         transferStack_->setCurrentWidget(sendPage);
 
-        layout->addWidget(transferStack_);
+        transferGroupLayout->addWidget(transferStack_);
+
+        // Keep a modest separation between the two primary work areas.
+        layout->setSpacing(12);
+        layout->addWidget(connectionGroup);
+        layout->addWidget(transferGroup);
 
         // Keep the status heading and current status value on one line
         QHBoxLayout *statusLayout = new QHBoxLayout();
@@ -463,50 +1168,75 @@ void MainWindow::handleConnectionInfoClicked() {
             ? "Unavailable"
             : localAddress.toString();
 
-    // Qt::Popup creates a lightweight temporary window that closes automatically
-    // when the user clicks somewhere outside it.
-    QFrame *popup = new QFrame(
-        nullptr,                    // parent: A popup is positioned independently on the screen.
-        Qt::Popup                   // flags: Temporary popup behavior with outside-click dismissal.
+    // Keep the native popup window transparent and frameless so its rectangular
+    // background cannot appear behind the rounded information surface.
+    QWidget *popup = new QWidget(
+        nullptr,                                        // parent: The popup is positioned independently on screen.
+        Qt::Popup | Qt::FramelessWindowHint             // flags: Temporary frameless popup with outside-click dismissal.
     );
 
     // Delete the temporary popup automatically when Qt closes it.
     popup->setAttribute(Qt::WA_DeleteOnClose);
+    popup->setAttribute(Qt::WA_TranslucentBackground);
 
-    popup->setFrameShape(QFrame::StyledPanel);
+    // Give the popup window transparent margins so the rounded surface and its
+    // shadow can render without being clipped by the top-level window bounds.
+    QVBoxLayout *windowLayout = new QVBoxLayout(popup);
+    windowLayout->setContentsMargins(8, 8, 8, 8);
+
+    // Draw the visible popup as a separate opaque frame so translucency applies
+    // only to the surrounding top-level window, not to the information itself.
+    QFrame *popupSurface = new QFrame(popup);
+    popupSurface->setFrameShape(QFrame::NoFrame);
+    popupSurface->setStyleSheet(
+        "QFrame {"
+        "background-color: #ffffff;"
+        "border: 1px solid #b8bbc0;"
+        "border-radius: 10px;"
+        "}"
+        "QLabel {"
+        "background-color: transparent;"
+        "border: none;"
+        "}"
+    );
+
+    QVBoxLayout *popupLayout = new QVBoxLayout(popupSurface);
+    popupLayout->setContentsMargins(20, 16, 20, 16);
 
     QLabel *titleLabel = new QLabel(
         "Connection Information",
-        popup
+        popupSurface
     );
 
-    // Make the popup heading visually distinct without creating another widget type.
+    // Make the popup heading visually distinct from the connection details.
     QFont titleFont = titleLabel->font();
     titleFont.setBold(true);
     titleLabel->setFont(titleFont);
 
     QLabel *addressNameLabel = new QLabel(
         "Local IPv4 address:",
-        popup
+        popupSurface
     );
 
     QLabel *addressValueLabel = new QLabel(
         addressText,
-        popup
+        popupSurface
     );
 
     QLabel *portNameLabel = new QLabel(
         "Listening port:",
-        popup
+        popupSurface
     );
 
     QLabel *portValueLabel = new QLabel(
         QString::number(connectionManager_.listeningPort()),
-        popup
+        popupSurface
     );
 
-    // A two-column grid keeps each value on the same line as its description.
+    // A two-column grid keeps each value aligned with its corresponding label.
     QGridLayout *infoLayout = new QGridLayout();
+    infoLayout->setHorizontalSpacing(18);
+    infoLayout->setVerticalSpacing(8);
 
     infoLayout->addWidget(
         addressNameLabel,   // widget: Description of the address field.
@@ -532,15 +1262,17 @@ void MainWindow::handleConnectionInfoClicked() {
         1                   // column: Value column.
     );
 
-    QVBoxLayout *popupLayout = new QVBoxLayout(popup);
-
     popupLayout->addWidget(titleLabel);
     popupLayout->addLayout(infoLayout);
 
-    // Let the popup become only as large as its contents require.
+    windowLayout->addWidget(popupSurface);
+
+    // Let the complete popup window become only as large as its contents and
+    // transparent shadow margins require.
     popup->adjustSize();
 
-    // Position the popup immediately below the small connection-information control.
+    // Position the popup below the information button while accounting for the
+    // transparent margin surrounding the visible rounded surface.
     const QPoint popupPosition = connectionInfoButton_->mapToGlobal(
         QPoint(
             connectionInfoButton_->width() - popup->width(),
@@ -555,108 +1287,60 @@ void MainWindow::handleConnectionInfoClicked() {
 
 /**
  * handleConnectClicked()
- * Starts an outgoing connection to the selected nearby FileBridge device
+ * Starts an outgoing connection using the currently selected connection mode.
  */
 void MainWindow::handleConnectClicked() {
-    QListWidgetItem *selectedPeer = nearbyDevicesList_->currentItem();
+    // Devices mode connects using endpoint information stored with the selected
+    // peer discovered automatically on the local network.
+    if(devicesModeButton_->isChecked()) {
+        QListWidgetItem *selectedPeer = nearbyDevicesList_->currentItem();
 
-    // Discovery-based connection requires the user to select one nearby device.
-    if(selectedPeer == nullptr) {
-        statusLabel_->setText("Select a nearby device");
+        if(selectedPeer == nullptr) {
+            statusLabel_->setText("Select a nearby device");
+            return;
+        }
+
+        connectToNearbyDevice(selectedPeer);
         return;
     }
 
-    connectToNearbyDevice(selectedPeer);
-}
-
-
-/**
- * handleManualConnectionClicked()
- * Displays a dialog for connecting directly to a peer by IP address and port
- */
-void MainWindow::handleManualConnectionClicked() {
-    QDialog manualDialog(this);
-
-    manualDialog.setWindowTitle("Manual Connection");
-    manualDialog.setModal(true);
-
-    QLabel *addressLabel = new QLabel("IP address:", &manualDialog);
-    QLabel *portLabel = new QLabel("Port:", &manualDialog);
-
-    QLineEdit *addressEdit = new QLineEdit(&manualDialog);
-    QLineEdit *portEdit = new QLineEdit(&manualDialog);
-
-    addressEdit->setPlaceholderText("192.168.0.10");
-    portEdit->setPlaceholderText("Port");
-
-    // Restrict manual port input to the valid TCP port-number range.
-    portEdit->setValidator(
-        new QIntValidator(
-            1,          // bottom: Lowest valid TCP port accepted by this dialog.
-            65535,      // top: Highest possible TCP port.
-            portEdit    // parent: The line edit owns and destroys its validator.
-        )
-    );
-
-    QPushButton *cancelButton = new QPushButton("Cancel", &manualDialog);
-    QPushButton *connectManualButton = new QPushButton("Connect", &manualDialog);
-
-    connectManualButton->setDefault(true);
-
-    // Cancel closes the dialog without starting any network operation.
-    QObject::connect(
-        cancelButton,                    // Sender: Cancel button in the manual connection dialog.
-        &QPushButton::clicked,           // Signal: Emitted when the user clicks Cancel.
-        &manualDialog,                   // Receiver: The temporary manual connection dialog.
-        &QDialog::reject                 // Slot: Closes the dialog with a rejected result.
-    );
-
-    // Connect closes the dialog so its entered values can be validated below.
-    QObject::connect(
-        connectManualButton,             // Sender: Connect button in the manual connection dialog.
-        &QPushButton::clicked,           // Signal: Emitted when the user clicks Connect.
-        &manualDialog,                   // Receiver: The temporary manual connection dialog.
-        &QDialog::accept                 // Slot: Closes the dialog with an accepted result.
-    );
-
-    // Keep labels and their corresponding input fields aligned in two columns.
-    QGridLayout *inputLayout = new QGridLayout();
-
-    inputLayout->addWidget(addressLabel, 0, 0);
-    inputLayout->addWidget(addressEdit, 0, 1);
-    inputLayout->addWidget(portLabel, 1, 0);
-    inputLayout->addWidget(portEdit, 1, 1);
-
-    QHBoxLayout *buttonLayout = new QHBoxLayout();
-
-    buttonLayout->addStretch();
-    buttonLayout->addWidget(cancelButton);
-    buttonLayout->addWidget(connectManualButton);
-
-    QVBoxLayout *dialogLayout = new QVBoxLayout(&manualDialog);
-
-    dialogLayout->addLayout(inputLayout);
-    dialogLayout->addLayout(buttonLayout);
-
-    // Closing or cancelling the dialog does not change the current connection state.
-    if(manualDialog.exec() != QDialog::Accepted) {
-        return;
-    }
-
-    const QHostAddress remoteAddress(addressEdit->text());
+    // Direct mode validates the endpoint entered explicitly by the user.
+    const QHostAddress remoteAddress(directAddressEdit_->text());
 
     bool validPort = false;
-    const unsigned int remotePort = portEdit->text().toUInt(&validPort);
+    const unsigned int remotePort = directPortEdit_->text().toUInt(&validPort);
 
-    // Reject malformed manual connection information before reaching ConnectionManager.
-    if(remoteAddress.isNull() || !validPort || remotePort == 0 || remotePort > 65535) {
+    // QIntValidator constrains normal keyboard input, but this explicit validation
+    // keeps malformed endpoint information from reaching ConnectionManager.
+    if(remoteAddress.isNull() ||
+        !validPort ||
+        remotePort == 0 ||
+        remotePort > 65535) {
+
         statusLabel_->setText("Invalid IP address or port");
         return;
     }
 
+    const QString endpoint =
+        remoteAddress.toString() +
+        ":" +
+        QString::number(remotePort);
+
+    // Record the actual connection source independently from whichever page the
+    // user later chooses to view while the connection remains active.
+    connectionOrigin_ = ConnectionOrigin::Direct;
+
+    directStatusLabel_->setText("Connecting to " + endpoint + "...");
+    directStatusLabel_->setVisible(true);
+
     statusLabel_->setText("Connecting...");
+
+    // Prevent another connection attempt while ConnectionManager is establishing
+    // this one, while allowing Disconnect to cancel the pending attempt.
     connectButton_->setEnabled(false);
-    manualConnectionButton_->setEnabled(false);
+    disconnectButton_->setEnabled(true);
+    directAddressEdit_->setEnabled(false);
+    directPortEdit_->setEnabled(false);
 
     connectionManager_.connectToPeer(
         remoteAddress,
@@ -666,20 +1350,100 @@ void MainWindow::handleManualConnectionClicked() {
 
 
 /**
+ * handleDevicesModeClicked()
+ * Displays the automatically discovered-device connection page.
+ */
+void MainWindow::handleDevicesModeClicked() {
+    // The Devices page is the first page added to connectionStack_ in the constructor.
+    connectionStack_->setCurrentIndex(0);
+
+    // Keep the header geometry unchanged while hiding the Direct-only control.
+    connectionInfoButton_->setEnabled(false);
+    connectionInfoButton_->setStyleSheet(
+        "QToolButton {"
+        "background-color: transparent;"
+        "color: transparent;"
+        "border: 1px solid transparent;"
+        "border-radius: 12px;"
+        "}"
+    );
+
+    // Keep only the active selector visually pressed so the controls read as navigation.
+    devicesModeButton_->setDown(true);
+    directModeButton_->setDown(false);
+}
+
+
+/**
+ * handleDirectModeClicked()
+ * Displays the direct IP-address and port connection page.
+ */
+void MainWindow::handleDirectModeClicked() {
+    // The Direct page is the second page added to connectionStack_ in the constructor.
+    connectionStack_->setCurrentIndex(1);
+
+    // Restore the Direct-only connection-information control without changing
+    // the header layout dimensions.
+    connectionInfoButton_->setEnabled(true);
+    connectionInfoButton_->setStyleSheet(
+        "QToolButton {"
+        "background-color: #f4f4f5;"
+        "color: #6b6f75;"
+        "border: 1px solid #b8bbc0;"
+        "border-radius: 12px;"
+        "font-size: 14px;"
+        "font-weight: 600;"
+        "}"
+        "QToolButton:hover {"
+        "background-color: #ffffff;"
+        "}"
+        "QToolButton:pressed {"
+        "background-color: #d7d8da;"
+        "}"
+    );
+
+    // Keep only the active selector visually pressed so the controls read as navigation.
+    devicesModeButton_->setDown(false);
+    directModeButton_->setDown(true);
+}
+
+
+/**
  * handleDisconnectClicked()
- * Disconnects the currently active FileBridge peer.
+ * Disconnects an active peer or cancels the current outgoing connection attempt.
  */
 void MainWindow::handleDisconnectClicked() {
-    // A null activePeer_ means this window does not currently have a validated peer to disconnect.
+    // Before a connection becomes a validated PeerConnection, Disconnect acts
+    // as cancellation for the currently pending outgoing connection lifecycle.
     if(activePeer_ == nullptr) {
+        if(!connectionManager_.cancelConnection()) {
+            statusLabel_->setText("Failed to cancel connection");
+            return;
+        }
+
+        statusLabel_->setText("Connection cancelled");
+
+        connectButton_->setEnabled(true);
+        disconnectButton_->setEnabled(false);
+
+        // Restore the Direct endpoint form when its pending connection attempt
+        // is cancelled so the user can immediately correct or retry the endpoint.
+        if(connectionOrigin_ == ConnectionOrigin::Direct) {
+            directAddressEdit_->setEnabled(true);
+            directPortEdit_->setEnabled(true);
+            directStatusLabel_->clear();
+        }
+
+        // The cancelled attempt no longer owns any connection lifecycle state.
+        connectionOrigin_ = ConnectionOrigin::None;
         return;
     }
 
     statusLabel_->setText("Disconnecting...");
     disconnectButton_->setEnabled(false);
 
-    // ConnectionManager owns the peer lifecycle and will emit peerDisconnected
-    // when the underlying TCP connection actually ends.
+    // ConnectionManager owns established peer shutdown and emits peerDisconnected
+    // after the underlying connection has actually ended.
     if(!connectionManager_.disconnectPeer(activePeer_)) {
         statusLabel_->setText("Failed to disconnect");
         disconnectButton_->setEnabled(true);
@@ -723,7 +1487,7 @@ void MainWindow::handleReceiveModeClicked() {
 
 /**
  * handleConnectionApprovalRequested()
- * Displays an approval dialog for an incoming FileBridge connection request
+ * Displays an approval dialog for an incoming FileBridge connection request.
  */
 void MainWindow::handleConnectionApprovalRequested(
     PeerConnection *connection,
@@ -739,7 +1503,7 @@ void MainWindow::handleConnectionApprovalRequested(
     raise();
     activateWindow();
 
-    // Request attention if macOS does not immediately grant this application focus.
+    // Request attention if the operating system does not immediately grant this application focus.
     QApplication::alert(this);
 
     // Parent the dialog directly to this receiving MainWindow.
@@ -750,6 +1514,7 @@ void MainWindow::handleConnectionApprovalRequested(
     approvalDialog.setWindowTitle("Connection request");
     approvalDialog.setModal(true);
 
+    // Explain which remote device is requesting permission to establish the FileBridge connection.
     QLabel *messageLabel = new QLabel(
         deviceName + " wants to connect to FileBridge.",
         &approvalDialog
@@ -757,19 +1522,14 @@ void MainWindow::handleConnectionApprovalRequested(
 
     messageLabel->setWordWrap(true);
 
-    // This preference lasts only until the current peer disconnects.
-    QCheckBox *autoAcceptCheckBox = new QCheckBox(
-        "Automatically accept incoming files for this connection",
-        &approvalDialog
-    );
-
-    autoAcceptCheckBox->setChecked(true);
-
+    // Reject closes the pending peer connection without granting FileBridge access.
     QPushButton *rejectButton = new QPushButton(
         "Reject",
         &approvalDialog
     );
 
+    // Accept approves only the peer connection itself.
+    // Individual incoming file offers still require their own explicit approval.
     QPushButton *acceptButton = new QPushButton(
         "Accept",
         &approvalDialog
@@ -794,7 +1554,7 @@ void MainWindow::handleConnectionApprovalRequested(
         &QDialog::accept              // Slot: Closes the dialog with the Accepted result.
     );
 
-    // Keep the two decision buttons together on one horizontal row.
+    // Keep the two connection-decision buttons together on one horizontal row.
     QHBoxLayout *buttonLayout = new QHBoxLayout();
 
     buttonLayout->addWidget(rejectButton);
@@ -804,7 +1564,6 @@ void MainWindow::handleConnectionApprovalRequested(
     QVBoxLayout *dialogLayout = new QVBoxLayout(&approvalDialog);
 
     dialogLayout->addWidget(messageLabel);
-    dialogLayout->addWidget(autoAcceptCheckBox);
     dialogLayout->addLayout(buttonLayout);
 
     approvalDialog.adjustSize();
@@ -826,20 +1585,14 @@ void MainWindow::handleConnectionApprovalRequested(
     const int result = approvalDialog.exec();
 
     if(result == QDialog::Accepted) {
-        // Remember whether this peer's file offers should be accepted automatically
-        // for the lifetime of this connection.
-        autoAcceptIncomingTransfers_ = autoAcceptCheckBox->isChecked();
-
+        // Connection approval grants communication with this peer but does not
+        // automatically approve any files that the peer may later offer.
         if(!connectionManager_.approveConnection(connection)) {
-            autoAcceptIncomingTransfers_ = false;
             statusLabel_->setText("Failed to approve connection");
         }
 
         return;
     }
-
-    // Rejecting the connection clears any connection-specific transfer permission.
-    autoAcceptIncomingTransfers_ = false;
 
     if(!connectionManager_.rejectConnection(connection)) {
         statusLabel_->setText("Failed to reject connection");
@@ -852,16 +1605,123 @@ void MainWindow::handleConnectionApprovalRequested(
 
 /**
  * handlePeerReady()
- * Updates the interface after a peer completes the FileBridge handshake
+ * Updates the interface after a peer completes the FileBridge handshake.
  */
 void MainWindow::handlePeerReady(PeerConnection *connection) {
-    // Remember which validated peer may receive file-transfer messages
+    // Remember which validated peer may receive file-transfer messages.
     activePeer_ = connection;
 
-    statusLabel_->setText("Connected");
+    const QString remoteDeviceName = connectionManager_.deviceName(connection);
+
+    // Identify the connected peer whenever the validated handshake supplied a
+    // device name, while retaining a safe generic fallback if it did not.
+    statusLabel_->setText(
+        remoteDeviceName.isEmpty()
+            ? "Connected"
+            : "Connected to " + remoteDeviceName
+    );
+
+    // A single active FileBridge connection prevents either connection method
+    // from starting another connection until this peer disconnects.
     connectButton_->setEnabled(false);
     disconnectButton_->setEnabled(true);
-    manualConnectionButton_->setEnabled(false);
+
+    // Show the shared connection indicator in its established state.
+    updateConnectionStateIcon(true);
+
+    // Direct initiators already contain the endpoint they entered. Keep those
+    // fields disabled while the active connection owns that endpoint.
+    if(connectionOrigin_ == ConnectionOrigin::Direct) {
+        directAddressEdit_->setEnabled(false);
+        directPortEdit_->setEnabled(false);
+        directStatusLabel_->clear();
+
+        // Prevent switching back to discovery while a Direct connection is active.
+        devicesModeButton_->setEnabled(false);
+    }
+    else if(connectionOrigin_ == ConnectionOrigin::None &&
+            connection->socket() != nullptr) {
+
+        // An incoming connection reached this FileBridge instance through its
+        // local listening endpoint, so preserve that endpoint for the Direct
+        // page without allowing the user to switch connection methods.
+        directAddressEdit_->setText(
+            connection->socket()->localAddress().toString()
+        );
+
+        directPortEdit_->setText(
+            QString::number(connection->socket()->localPort())
+        );
+
+        directAddressEdit_->setEnabled(false);
+        directPortEdit_->setEnabled(false);
+        directStatusLabel_->clear();
+
+        // Incoming connections arrive through FileBridge's listening endpoint,
+        // so present the active connection using the Devices workflow regardless
+        // of which connection page the receiver was viewing beforehand.
+        devicesModeButton_->setChecked(true);
+        handleDevicesModeClicked();
+
+        // Match the incoming peer against its current discovery entry so the
+        // receiving side also marks the connected device in the Devices list.
+        const QString remoteAddress = connection->socket()->peerAddress().toString();
+
+        for(int index = 0; index < nearbyDevicesList_->count(); ++index) {
+            QListWidgetItem *item = nearbyDevicesList_->item(index);
+
+            const QString discoveredDeviceName =
+                item->data(NEARBY_DEVICE_NAME_ROLE).toString();
+
+            const QString discoveredAddress =
+                item->data(NEARBY_DEVICE_ADDRESS_ROLE).toString();
+
+            if(discoveredDeviceName != remoteDeviceName ||
+               discoveredAddress != remoteAddress) {
+
+                continue;
+            }
+
+            item->setData(
+                NEARBY_DEVICE_STATE_ROLE,
+                static_cast<int>(NearbyDeviceState::Connected)
+            );
+
+            updateNearbyDeviceDisplay(item);
+            break;
+        }
+
+        // The receiving side is already connected through the Devices workflow,
+        // so Direct must remain unavailable until that peer disconnects.
+        directModeButton_->setEnabled(false);
+    }
+    else if(connectionOrigin_ == ConnectionOrigin::Devices) {
+        // Promote the discovered peer that initiated this successful outgoing
+        // connection from Connecting to Connected.
+        for(int index = 0; index < nearbyDevicesList_->count(); ++index) {
+            QListWidgetItem *item = nearbyDevicesList_->item(index);
+
+            const NearbyDeviceState state = static_cast<NearbyDeviceState>(
+                item->data(NEARBY_DEVICE_STATE_ROLE).toInt()
+            );
+
+            if(state != NearbyDeviceState::Connecting) {
+                continue;
+            }
+
+            item->setData(
+                NEARBY_DEVICE_STATE_ROLE,
+                static_cast<int>(NearbyDeviceState::Connected)
+            );
+
+            updateNearbyDeviceDisplay(item);
+            break;
+        }
+
+        // Keep the connection method fixed while a discovered-device
+        // connection remains active.
+        directModeButton_->setEnabled(false);
+    }
 
     updateOutgoingQueueControls();
 }
@@ -869,24 +1729,58 @@ void MainWindow::handlePeerReady(PeerConnection *connection) {
 
 /**
  * handleConnectionRejected()
- * Updates the interface when a remote user rejects an outgoing connection request
+ * Updates the interface when a remote user rejects an outgoing connection request.
  */
 void MainWindow::handleConnectionRejected(PeerConnection *connection) {
     Q_UNUSED(connection);
 
-    // The rejected connection never became an active transfer peer.
-    autoAcceptIncomingTransfers_ = false;
-
     statusLabel_->setText("Connection rejected");
+
     connectButton_->setEnabled(true);
     disconnectButton_->setEnabled(false);
-    manualConnectionButton_->setEnabled(true);
+
+    // A rejected request leaves FileBridge disconnected.
+    updateConnectionStateIcon(false);
+
+    // Return any discovered peer involved in the rejected outgoing attempt
+    // to its normal available state.
+    if(connectionOrigin_ == ConnectionOrigin::Devices) {
+        for(int index = 0; index < nearbyDevicesList_->count(); ++index) {
+            QListWidgetItem *item = nearbyDevicesList_->item(index);
+
+            const NearbyDeviceState state = static_cast<NearbyDeviceState>(
+                item->data(NEARBY_DEVICE_STATE_ROLE).toInt()
+            );
+
+            if(state != NearbyDeviceState::Connecting) {
+                continue;
+            }
+
+            item->setData(
+                NEARBY_DEVICE_STATE_ROLE,
+                static_cast<int>(NearbyDeviceState::Available)
+            );
+
+            updateNearbyDeviceDisplay(item);
+            break;
+        }
+    }
+
+    // A rejected Direct attempt returns the Direct page to its editable idle state.
+    if(connectionOrigin_ == ConnectionOrigin::Direct) {
+        directAddressEdit_->setEnabled(true);
+        directPortEdit_->setEnabled(true);
+        directStatusLabel_->clear();
+    }
+
+    // The rejected attempt no longer owns any connection lifecycle state.
+    connectionOrigin_ = ConnectionOrigin::None;
 }
 
 
 /**
  * handlePeerDisconnected()
- * Updates the interface after an established or pending peer disconnects
+ * Updates the interface after an established or pending peer disconnects.
  */
 void MainWindow::handlePeerDisconnected(PeerConnection *connection) {
     if(connection != activePeer_) {
@@ -895,9 +1789,6 @@ void MainWindow::handlePeerDisconnected(PeerConnection *connection) {
 
     // The PeerConnection will be destroyed by ConnectionManager after this signal returns.
     activePeer_ = nullptr;
-
-    // Automatic file acceptance is trusted only for the lifetime of this connection.
-    autoAcceptIncomingTransfers_ = false;
 
     // Preserve the visible queue, but stop processing until another peer is connected.
     outgoingQueueSending_ = false;
@@ -914,9 +1805,54 @@ void MainWindow::handlePeerDisconnected(PeerConnection *connection) {
     }
 
     statusLabel_->setText("Disconnected");
+
     connectButton_->setEnabled(true);
     disconnectButton_->setEnabled(false);
-    manualConnectionButton_->setEnabled(true);
+
+    // Return the shared connection indicator to its idle state.
+    updateConnectionStateIcon(false);
+
+    // Return the previously connected discovered peer to its normal available
+    // state while it remains present in the LAN discovery list.
+    for(int index = 0; index < nearbyDevicesList_->count(); ++index) {
+        QListWidgetItem *item = nearbyDevicesList_->item(index);
+
+        const NearbyDeviceState state = static_cast<NearbyDeviceState>(
+            item->data(NEARBY_DEVICE_STATE_ROLE).toInt()
+        );
+
+        if(state != NearbyDeviceState::Connected) {
+            continue;
+        }
+
+        item->setData(
+            NEARBY_DEVICE_STATE_ROLE,
+            static_cast<int>(NearbyDeviceState::Available)
+        );
+
+        updateNearbyDeviceDisplay(item);
+        break;
+    }
+
+    // Direct endpoint controls become editable again after the active connection
+    // ends, including connections that were originally accepted from a remote peer.
+    if(connectionOrigin_ == ConnectionOrigin::Direct ||
+        connectionOrigin_ == ConnectionOrigin::None) {
+
+        directAddressEdit_->setEnabled(true);
+        directPortEdit_->setEnabled(true);
+        directStatusLabel_->clear();
+
+        // Discovery becomes available again once Direct no longer owns the connection.
+        devicesModeButton_->setEnabled(true);
+    }
+
+    // Restore both connection methods after the active peer has gone away.
+    devicesModeButton_->setEnabled(true);
+    directModeButton_->setEnabled(true);
+
+    // No connection origin remains meaningful after the peer has disconnected.
+    connectionOrigin_ = ConnectionOrigin::None;
 
     acceptTransferButton_->setEnabled(false);
     rejectTransferButton_->setEnabled(false);
@@ -1185,6 +2121,76 @@ void MainWindow::updateOutgoingQueueControls() {
 
 
 /**
+ * updateConnectionStateIcon()
+ * Updates the shared connection-state icon for disconnected or connected state.
+ */
+void MainWindow::updateConnectionStateIcon(bool connected) {
+    QPixmap statePixmap(42, 20);
+    statePixmap.fill(Qt::transparent);
+
+    QPainter painter(&statePixmap);
+    painter.setRenderHint(QPainter::Antialiasing);
+
+    QPen statePen(
+        connected
+            ? QColor("#55585d")
+            : QColor("#8a8e94")
+    );
+
+    statePen.setWidthF(1.6);
+
+    painter.setPen(statePen);
+    painter.setBrush(Qt::NoBrush);
+
+    // Draw the two device endpoints using the same geometry in both states.
+    painter.drawRoundedRect(
+        QRectF(2.0, 4.0, 10.0, 12.0),
+        2.0,
+        2.0
+    );
+
+    painter.drawRoundedRect(
+        QRectF(30.0, 4.0, 10.0, 12.0),
+        2.0,
+        2.0
+    );
+
+    if(connected) {
+        // A continuous line communicates one established connection between
+        // the two endpoints.
+        painter.drawLine(
+            QPointF(12.0, 10.0),
+            QPointF(30.0, 10.0)
+        );
+    }
+    else {
+        // A deliberate center gap distinguishes the idle state from an
+        // established connection without changing the icon's overall shape.
+        painter.drawLine(
+            QPointF(12.0, 10.0),
+            QPointF(18.0, 10.0)
+        );
+
+        painter.drawLine(
+            QPointF(24.0, 10.0),
+            QPointF(30.0, 10.0)
+        );
+    }
+
+    painter.end();
+
+    connectionStateIcon_->setPixmap(statePixmap);
+    connectionStateIcon_->setAlignment(Qt::AlignCenter);
+    connectionStateIcon_->setFixedSize(42, 20);
+    connectionStateIcon_->setToolTip(
+        connected
+            ? "Connected"
+            : "Not connected"
+    );
+}
+
+
+/**
  * updateOutgoingTransferDisplay()
  * Updates one outgoing transfer row to match its current state and progress
  */
@@ -1298,21 +2304,46 @@ void MainWindow::updateReceiveModeAttention() {
     receiveModeButton_->setIcon(QIcon());
 
     if(needsAttention) {
-        // Use a high-contrast inverted appearance while preserving rounded corners
-        // so the attention state still fits the surrounding macOS-style controls.
+        // Preserve the Receive segment's joined geometry while using a
+        // high-contrast appearance to draw attention to incoming activity.
         receiveModeButton_->setStyleSheet(
             "QPushButton {"
             "background-color: black;"
             "color: white;"
             "border: 1px solid black;"
-            "border-radius: 6px;"
-            "padding: 4px 10px;"
+            "border-top-left-radius: 0;"
+            "border-bottom-left-radius: 0;"
+            "border-top-right-radius: 8px;"
+            "border-bottom-right-radius: 8px;"
+            "}"
+            "QPushButton:checked {"
+            "background-color: #969696;"
+            "color: #ffffff;"
+            "border: 1px solid #b8bbc0;"
+            "border-top-left-radius: 0;"
+            "border-bottom-left-radius: 0;"
+            "border-top-right-radius: 8px;"
+            "border-bottom-right-radius: 8px;"
             "}"
         );
     }
     else {
-        // Clearing the stylesheet restores the normal platform button appearance.
-        receiveModeButton_->setStyleSheet(QString());
+        // Restore the normal Receive appearance without losing the right-hand
+        // geometry that makes it part of the joined transfer-mode selector.
+        receiveModeButton_->setStyleSheet(
+            "QPushButton {"
+            "background-color: #d7d8da;"
+            "border: 1px solid #b8bbc0;"
+            "border-top-left-radius: 0;"
+            "border-bottom-left-radius: 0;"
+            "border-top-right-radius: 8px;"
+            "border-bottom-right-radius: 8px;"
+            "}"
+            "QPushButton:checked {"
+            "background-color: #969696;"
+            "color: #ffffff;"
+            "}"
+        );
     }
 }
 
@@ -1392,12 +2423,13 @@ void MainWindow::handleOutgoingTransferRejected(std::uint64_t transferId) {
         break;
     }
 
-    statusLabel_->setText("Transfer rejected");
-
     // Re-evaluate the active batch while preserving this rejected history row.
     if(outgoingQueueSending_) {
         offerQueuedFiles();
     }
+
+    // Keep the rejection visible even if batch reevaluation reaches its final state.
+    statusLabel_->setText("Transfer rejected");
 }
 
 
@@ -1629,7 +2661,7 @@ void MainWindow::handleIncomingTransferProgress(
 
 /**
  * handleIncomingTransferOffered()
- * Adds a newly offered file to the incoming list and applies the current connection approval policy
+ * Adds a newly offered file to the incoming list for explicit receiver approval.
  */
 void MainWindow::handleIncomingTransferOffered(const TransferManager::IncomingTransfer& transfer) {
     // Create the QListWidgetItem as the persistent logical row for this transfer.
@@ -1670,10 +2702,10 @@ void MainWindow::handleIncomingTransferOffered(const TransferManager::IncomingTr
         static_cast<qulonglong>(0)
     );
 
-    // Manual incoming offer begin in the pending state until the receiver accepts or rejects them
+    // Every incoming offer requires an explicit receiver decision before file data is accepted.
     item->setData(
         INCOMING_TRANSFER_PENDING_ROLE,
-        !autoAcceptIncomingTransfers_
+        true
     );
 
     // A new incoming transfer must remain visible until it completes or is rejected.
@@ -1682,48 +2714,19 @@ void MainWindow::handleIncomingTransferOffered(const TransferManager::IncomingTr
         false
     );
 
-    // A manually reviewed offer remains Pending until the receiver accepts or rejects it.
+    // New offers begin in Pending and remain there until the receiver accepts or rejects them.
     item->setData(
         INCOMING_TRANSFER_STATE_ROLE,
         static_cast<int>(IncomingTransferState::Pending)
     );
 
+    // Build the visible row from the stored metadata and initial Pending state.
     updateIncomingTransferDisplay(item);
 
-    // Refresh the Receive selector before processing the connection's approval policy
+    // Update the Receive selector so the user can immediately see that a file requires attention.
     updateReceiveModeAttention();
 
-    // Automatically accept the offer when the user trusted incoming files for this connection.
-    if(autoAcceptIncomingTransfers_) {
-        if(!transferManager_.acceptIncomingTransfer(transfer.transferId)) {
-            statusLabel_->setText("Failed to automatically accept incoming transfer");
-            return;
-        }
-
-        // Acceptance resolves the decision, but file data may still wait behind
-        // another active transfer from this peer.
-        item->setData(
-            INCOMING_TRANSFER_STATE_ROLE,
-            static_cast<int>(IncomingTransferState::Waiting)
-        );
-
-        // Automatically accepted incoming files are active work, so show their
-        // transfer page immediately instead of leaving the user on the Send page.
-        receiveModeButton_->setChecked(true);
-        handleReceiveModeClicked();
-
-        statusLabel_->setText(
-            "Receiving: " +
-            transfer.fileName +
-            " (" +
-            formatFileSize(transfer.fileSize) +
-            ")"
-        );
-
-        return;
-    }
-
-    // Manual mode leaves this row pending until the user explicitly selects and resolves it.
+    // Enable the appropriate Accept/Reject controls for the newly pending offer.
     updateIncomingDecisionControls();
 
     statusLabel_->setText(
@@ -2054,12 +3057,51 @@ void MainWindow::handleOutgoingTransferProgress(
 
 /**
  * handleConnectionFailed()
- * Displays an outgoing connection failure in the interface
+ * Displays an outgoing connection failure in the interface.
  */
 void MainWindow::handleConnectionFailed(const QString& errorMessage) {
     statusLabel_->setText("Connection failed: " + errorMessage);
+
     connectButton_->setEnabled(true);
-    manualConnectionButton_->setEnabled(true);
+    disconnectButton_->setEnabled(false);
+
+    // A failed outgoing attempt leaves FileBridge disconnected.
+    updateConnectionStateIcon(false);
+
+    // Return any discovered peer involved in the failed outgoing attempt
+    // to its normal available state.
+    if(connectionOrigin_ == ConnectionOrigin::Devices) {
+        for(int index = 0; index < nearbyDevicesList_->count(); ++index) {
+            QListWidgetItem *item = nearbyDevicesList_->item(index);
+
+            const NearbyDeviceState state = static_cast<NearbyDeviceState>(
+                item->data(NEARBY_DEVICE_STATE_ROLE).toInt()
+            );
+
+            if(state != NearbyDeviceState::Connecting) {
+                continue;
+            }
+
+            item->setData(
+                NEARBY_DEVICE_STATE_ROLE,
+                static_cast<int>(NearbyDeviceState::Available)
+            );
+
+            updateNearbyDeviceDisplay(item);
+            break;
+        }
+    }
+
+    // A failed Direct attempt returns to the same editable endpoint form so the
+    // user can correct the address or port and immediately try again.
+    if(connectionOrigin_ == ConnectionOrigin::Direct) {
+        directAddressEdit_->setEnabled(true);
+        directPortEdit_->setEnabled(true);
+        directStatusLabel_->clear();
+    }
+
+    // The failed attempt no longer has an active connection origin.
+    connectionOrigin_ = ConnectionOrigin::None;
 }
 
 
@@ -2089,6 +3131,111 @@ void MainWindow::handlePeerDiscovered(const DiscoveredPeer& peer) {
         NEARBY_DEVICE_PORT_ROLE,            // Role: Hidden field reserved for this peer's TCP listening port.
         static_cast<unsigned int>(peer.port) // Value: Port advertised by the remote FileBridge instance.
     );
+
+    // Store the device name separately so the visible row can be rebuilt
+    // without parsing text after connection-state labels are appended.
+    item->setData(
+        NEARBY_DEVICE_NAME_ROLE,
+        peer.deviceName
+    );
+
+    // Newly discovered peers begin in the normal available state.
+    item->setData(
+        NEARBY_DEVICE_STATE_ROLE,
+        static_cast<int>(NearbyDeviceState::Available)
+    );
+
+    updateNearbyDeviceDisplay(item);
+}
+
+
+/**
+ * updateNearbyDeviceDisplay()
+ * Rebuilds one discovered-device row from its stored identity and connection state.
+ */
+void MainWindow::updateNearbyDeviceDisplay(QListWidgetItem *item) {
+    if(item == nullptr) {
+        return;
+    }
+
+    QWidget *rowWidget = nearbyDevicesList_->itemWidget(item);
+    QLabel *deviceLabel = nullptr;
+    QLabel *stateLabel = nullptr;
+
+    // Create the row presentation once. Later state changes reuse these labels
+    // instead of replacing the QListWidgetItem or reconstructing its metadata.
+    if(rowWidget == nullptr) {
+        rowWidget = new QWidget(nearbyDevicesList_);
+
+        QHBoxLayout *rowLayout = new QHBoxLayout(rowWidget);
+
+        // Keep the custom row aligned closely with the QListWidget's normal
+        // item text while reserving the far-right edge for connection state.
+        rowLayout->setContentsMargins(6, 0, 6, 0);
+        rowLayout->setSpacing(8);
+
+        deviceLabel = new QLabel(rowWidget);
+        stateLabel = new QLabel(rowWidget);
+
+        // Object names allow later display updates to recover the two labels
+        // without storing widget pointers inside QListWidgetItem metadata.
+        deviceLabel->setObjectName("nearbyDeviceName");
+        stateLabel->setObjectName("nearbyDeviceState");
+
+        stateLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+
+        // Keep the state visually secondary to the device identity while still
+        // making availability and connection state immediately visible.
+        stateLabel->setStyleSheet(
+            "color: #747980;"
+            "font-weight: 500;"
+        );
+
+        rowLayout->addWidget(deviceLabel);
+        rowLayout->addStretch(1);
+        rowLayout->addWidget(stateLabel);
+
+        nearbyDevicesList_->setItemWidget(item, rowWidget);
+
+        // The custom row widget now owns all visible presentation for this item,
+        // so clear the QListWidgetItem text to prevent Qt from drawing it underneath.
+        item->setText(QString());
+    }
+    else {
+        // Recover the labels created for this row so only their presentation
+        // changes when the device moves through its transient connection states.
+        deviceLabel = rowWidget->findChild<QLabel *>("nearbyDeviceName");
+        stateLabel = rowWidget->findChild<QLabel *>("nearbyDeviceState");
+    }
+
+    if(deviceLabel == nullptr || stateLabel == nullptr) {
+        return;
+    }
+
+    const QString deviceName = item->data(NEARBY_DEVICE_NAME_ROLE).toString();
+    const QString address = item->data(NEARBY_DEVICE_ADDRESS_ROLE).toString();
+
+    deviceLabel->setText(deviceName + " - " + address);
+
+    // Convert the stored state back into the short label presented at the
+    // far-right side of the discovered-device row.
+    const NearbyDeviceState state = static_cast<NearbyDeviceState>(
+        item->data(NEARBY_DEVICE_STATE_ROLE).toInt()
+    );
+
+    switch(state) {
+        case NearbyDeviceState::Available:
+            stateLabel->setText("Available");
+            break;
+
+        case NearbyDeviceState::Connecting:
+            stateLabel->setText("Connecting...");
+            break;
+
+        case NearbyDeviceState::Connected:
+            stateLabel->setText("Connected");
+            break;
+    }
 }
 
 
@@ -2149,8 +3296,21 @@ void MainWindow::connectToNearbyDevice(QListWidgetItem *item) {
         return;
     }
 
+    // Record the connection source independently from the currently displayed
+    // Devices or Direct page so later lifecycle events update the correct UI.
+    connectionOrigin_ = ConnectionOrigin::Devices;
+
+    // Mark only the selected discovered peer as actively connecting.
+    item->setData(
+        NEARBY_DEVICE_STATE_ROLE,
+        static_cast<int>(NearbyDeviceState::Connecting)
+    );
+
+    updateNearbyDeviceDisplay(item);
+
     statusLabel_->setText("Connecting...");
     connectButton_->setEnabled(false);
+    disconnectButton_->setEnabled(true);
 
     connectionManager_.connectToPeer(
         remoteAddress,

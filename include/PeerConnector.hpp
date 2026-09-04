@@ -27,6 +27,12 @@ class PeerConnector : public QObject {
         void connectToPeer(const QHostAddress& address, std::uint16_t port);
 
         /**
+         * cancelConnection()
+         * Cancels the current outgoing connection attempt if one is in progress.
+         */
+        bool cancelConnection();
+
+        /**
          * isConnecting()
          * Returns whether an outgoing connection attempt is currently in progress
          */

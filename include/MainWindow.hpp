@@ -46,10 +46,16 @@ class MainWindow : public QMainWindow {
         void handleConnectClicked();
 
         /**
-         * handleManualConnectionClicked()
-         * Displays a dialog for connecting directly to a peer by IP address and port
+         * handleDevicesModeClicked()
+         * Displays the automatically discovered-device connection page.
          */
-        void handleManualConnectionClicked();
+        void handleDevicesModeClicked();
+
+        /**
+         * handleDirectModeClicked()
+         * Displays the direct IP-address and port connection page.
+         */
+        void handleDirectModeClicked();
 
         /** 
          * handleDisconnectClicked()
@@ -238,6 +244,18 @@ class MainWindow : public QMainWindow {
         void updateOutgoingQueueControls();
 
         /**
+         * updateConnectionStateIcon()
+         * Updates the shared connection-state icon for disconnected or connected state.
+         */
+        void updateConnectionStateIcon(bool connected);
+
+        /**
+         * updateNearbyDeviceDisplay()
+         * Rebuilds one discovered-device row from its stored identity and connection state.
+         */
+        void updateNearbyDeviceDisplay(QListWidgetItem *item);
+
+        /**
          * updateOutgoingTransferDisplay()
          * Updates one outgoing transfer row to match its current state and progress
          */
@@ -267,6 +285,16 @@ class MainWindow : public QMainWindow {
          */
         void updateIncomingTransferDisplay(QListWidgetItem *item);
 
+        /**
+         * NearbyDeviceState
+         * Represents the transient connection state displayed for one discovered device.
+         */
+        enum class NearbyDeviceState : int {
+            Available = 0,
+            Connecting = 1,
+            Connected = 2
+        };
+
         // Hidden QListWidgetItem data role containing the peer's unique running-instance ID
         static constexpr int NEARBY_DEVICE_INSTANCE_ID_ROLE = Qt::UserRole;
 
@@ -275,6 +303,12 @@ class MainWindow : public QMainWindow {
 
         // Hidden QListWidgetItem data role containing the peer's TCP listening port
         static constexpr int NEARBY_DEVICE_PORT_ROLE = Qt::UserRole + 2;
+
+        // Hidden QListWidgetItem data role containing the peer's human-readable device name
+        static constexpr int NEARBY_DEVICE_NAME_ROLE = Qt::UserRole + 3;
+
+        // Hidden QListWidgetItem data role containing the discovered device's current display state
+        static constexpr int NEARBY_DEVICE_STATE_ROLE = Qt::UserRole + 4;
 
         // Hidden QListWidgetItem data role containing an outgoing file's full local path
         static constexpr int OUTGOING_FILE_PATH_ROLE = Qt::UserRole;
@@ -329,6 +363,16 @@ class MainWindow : public QMainWindow {
             Failed = 5
         };
 
+        /**
+         * ConnectionOrigin
+         * Identifies how the current outgoing peer connection was initiated.
+         */
+        enum class ConnectionOrigin : int {
+            None = 0,
+            Devices = 1,
+            Direct = 2
+        };
+
         // Hidden QListWidgetItem data role containing the incoming transfer's current display state
         static constexpr int INCOMING_TRANSFER_STATE_ROLE = Qt::UserRole + 3;
 
@@ -353,8 +397,8 @@ class MainWindow : public QMainWindow {
         // Identifies the peer currently available for file-transfer operations
         PeerConnection *activePeer_;
 
-        // Controls whether incoming file offers are accepted automatically for the current connection
-        bool autoAcceptIncomingTransfers_;
+        // Records how the current outgoing connection attempt was initiated
+        ConnectionOrigin connectionOrigin_;
 
         // Becomes true while FileBridge is processing the current outgoing file queue
         bool outgoingQueueSending_;
@@ -362,17 +406,41 @@ class MainWindow : public QMainWindow {
         // Opens a dialog showing local address and listening-port information
         QToolButton *connectionInfoButton_;
 
+        // Displays a compact visual indicator for the current peer-connection state
+        QLabel *connectionStateIcon_;
+
         // Displays FileBridge instances currently discovered on the local network
         QListWidget *nearbyDevicesList_;
+
+        // Groups the Devices and Direct connection modes so only one may be selected at a time
+        QButtonGroup *connectionModeButtonGroup_;
+
+        // Selects the automatically discovered-device connection page
+        QPushButton *devicesModeButton_;
+
+        // Selects the direct IP-address and port connection page
+        QPushButton *directModeButton_;
+
+        // Displays either the Devices page or Direct page in the connection area
+        QStackedWidget *connectionStack_;
+
+        // Contains the Direct address and port controls so the complete input form can be shown or hidden together
+        QWidget *directInputWidget_;
+
+        // Accepts the remote IPv4 address used for a direct connection
+        QLineEdit *directAddressEdit_;
+
+        // Accepts the remote TCP port used for a direct connection
+        QLineEdit *directPortEdit_;
+
+        // Displays the current Direct connection attempt or established endpoint
+        QLabel *directStatusLabel_;
 
         // Starts an outgoing peer connection using the entered address and port
         QPushButton *connectButton_;
 
         // Disconnects the currently active FileBridge peer
         QPushButton *disconnectButton_;
-
-        // Opens the direct IP-address and port connection dialog
-        QPushButton *manualConnectionButton_;
 
         // Groups the Send and Receive mode button so only one can be selected at a time
         QButtonGroup *transferModeButtonGroup_;

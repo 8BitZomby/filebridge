@@ -69,6 +69,41 @@ void ConnectionManager::connectToPeer(const QHostAddress& address, std::uint16_t
 
 
 /**
+ * cancelConnection()
+ * Cancels the current outgoing connection attempt if one is in progress.
+ */
+bool ConnectionManager::cancelConnection() {
+    // The connector owns the socket only during the initial asynchronous TCP
+    // connection phase, so give it the first opportunity to cancel the attempt.
+    if(connector_.cancelConnection()) {
+        return true;
+    }
+
+    // Once TCP connects, ownership moves into a managed PeerConnection while
+    // FileBridge performs its handshake and waits for remote approval.
+    auto pendingPeer = std::find_if(
+        connections_.begin(),
+        connections_.end(),
+        [](const ManagedPeer& managedPeer) {
+            return
+                managedPeer.direction == ConnectionDirection::Outgoing &&
+                !managedPeer.approved;
+        }
+    );
+
+    if(pendingPeer == connections_.end()) {
+        return false;
+    }
+
+    // Closing the pending PeerConnection cancels the remaining handshake or
+    // approval phase and lets the normal disconnected path clean it up.
+    pendingPeer->connection->disconnectFromPeer();
+
+    return true;
+}
+
+
+/**
  * approveConnection()
  * Approves a pending incoming FileBridge connection.
  */
@@ -367,6 +402,28 @@ bool ConnectionManager::sendError(PeerConnection *connection, const Protocol::Er
  */
 std::uint16_t ConnectionManager::listeningPort() const {
     return listener_.port();
+}
+
+
+/**
+ * deviceName()
+ * Returns the remote device name associated with a managed peer connection.
+ */
+QString ConnectionManager::deviceName(PeerConnection *connection) const {
+    const auto peer = std::find_if(
+        connections_.begin(),
+        connections_.end(),
+        [connection](const ManagedPeer& managedPeer) {
+            return managedPeer.connection == connection;
+        }
+    );
+
+    // Unknown or already-removed connections have no associated device name.
+    if(peer == connections_.end()) {
+        return QString();
+    }
+
+    return peer->deviceName;
 }
 
 

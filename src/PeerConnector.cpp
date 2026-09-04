@@ -44,6 +44,34 @@ void PeerConnector::connectToPeer(const QHostAddress& address, std::uint16_t por
 
 
 /**
+ * cancelConnection()
+ * Cancels the current outgoing connection attempt if one is in progress.
+ */
+bool PeerConnector::cancelConnection() {
+    if(socket_ == nullptr) {
+        return false;
+    }
+
+    // Detach the connector's error handler before aborting so an intentional
+    // cancellation is not reported to the interface as a connection failure.
+    QObject::disconnect(
+        socket_,                            // Sender: Socket used by the current outgoing attempt.
+        &QTcpSocket::errorOccurred,         // Signal: Normally reports genuine connection failures.
+        this,                               // Receiver: This PeerConnector instance.
+        &PeerConnector::handleError         // Slot: Must not run for an intentional cancellation.
+    );
+
+    // abort() immediately terminates the asynchronous connection attempt rather
+    // than waiting for the operating system's normal connection timeout.
+    socket_->abort();
+    socket_->deleteLater();
+    socket_ = nullptr;
+
+    return true;
+}
+
+
+/**
  * isConnecting()
  * Returns whether an outgoing connection attempt is currently in progress
  */

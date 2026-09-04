@@ -41,6 +41,12 @@ class ConnectionManager : public QObject {
         void connectToPeer(const QHostAddress& address, std::uint16_t port);
 
         /**
+         * cancelConnection()
+         * Cancels the current outgoing connection attempt if one is in progress.
+         */
+        bool cancelConnection();
+
+        /**
          * approveConnection()
          * Approves a pending incoming FileBridge connection.
          */
@@ -104,6 +110,12 @@ class ConnectionManager : public QObject {
          * Returns the TCP port currently used for incoming peer connections
          */
         std::uint16_t listeningPort() const;
+
+        /**
+         * deviceName()
+         * Returns the remote device name associated with a managed peer connection.
+         */
+        QString deviceName(PeerConnection *connection) const;
 
     signals:
 
