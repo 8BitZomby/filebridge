@@ -5,6 +5,7 @@
 #include <QDateTime>
 #include <QHash>
 #include <QHostAddress>
+#include <QNetworkInterface>
 #include <QObject>
 #include <QString>
 #include <QTimer>
@@ -132,6 +133,10 @@ class PeerDiscovery : public QObject {
 
         // UDP socket used to receive FileBridge discovery broadcasts
         QUdpSocket socket_;
+
+        // Network interfaces on which this socket successfully joined the
+        // FileBridge multicast group for LAN discovery.
+        QList<QNetworkInterface> multicastInterfaces_;
 
         /**
          * KnownPeer

@@ -63,9 +63,49 @@ bool PeerDiscovery::start() {
         return false;
     }
 
-    // Join the FileBridge multicast group so this instance receives announcements
-    // sent by every other FileBridge instance on the local network
-    if(!socket_.joinMulticastGroup(DISCOVERY_MULTICAST_GROUP)) {
+    // Join the FileBridge multicast group on every active, running, non-loopback
+    // interface that supports multicast so discovery works correctly on systems
+    // with multiple physical, virtual, or VPN network adapters.
+    multicastInterfaces_.clear();
+
+    const auto interfaces = QNetworkInterface::allInterfaces();
+
+    for(const QNetworkInterface& interface : interfaces) {
+        const auto flags = interface.flags();
+
+        if(!flags.testFlag(QNetworkInterface::IsUp) ||
+           !flags.testFlag(QNetworkInterface::IsRunning) ||
+           flags.testFlag(QNetworkInterface::IsLoopBack) ||
+           !flags.testFlag(QNetworkInterface::CanMulticast)) {
+
+            continue;
+        }
+
+        // Skip interfaces that do not expose any IPv4 address because FileBridge
+        // discovery currently uses an IPv4 multicast group.
+        bool hasIPv4Address = false;
+
+        for(const QNetworkAddressEntry& entry : interface.addressEntries()) {
+            if(entry.ip().protocol() == QAbstractSocket::IPv4Protocol) {
+                hasIPv4Address = true;
+                break;
+            }
+        }
+
+        if(!hasIPv4Address) {
+            continue;
+        }
+
+        // Joining may legitimately fail on some virtual or restricted
+        // interfaces, so keep only the memberships that succeed.
+        if(socket_.joinMulticastGroup(DISCOVERY_MULTICAST_GROUP, interface)) {
+            multicastInterfaces_.push_back(interface);
+        }
+    }
+
+    // Discovery cannot operate if no usable interface accepted the multicast
+    // membership, so close the socket and report startup failure.
+    if(multicastInterfaces_.isEmpty()) {
         socket_.close();
         return false;
     }
@@ -102,10 +142,19 @@ void PeerDiscovery::stop() {
     // Stop checking for expired peers while discovery is inactive
     cleanupTimer_.stop();
 
-    // Leave the multicast group before closing the UDP socket
+    // Leave every interface-specific multicast membership that was established
+    // during start() before closing the shared discovery socket.
     if(socket_.state() != QAbstractSocket::UnconnectedState) {
-        socket_.leaveMulticastGroup(DISCOVERY_MULTICAST_GROUP);
+        for(const QNetworkInterface& interface : multicastInterfaces_) {
+            socket_.leaveMulticastGroup(
+                DISCOVERY_MULTICAST_GROUP,
+                interface
+            );
+        }
     }
+
+    // No multicast memberships remain meaningful once discovery has stopped.
+    multicastInterfaces_.clear();
 
     // Stop receiving UDP discovery traffic
     socket_.close();
@@ -293,12 +342,18 @@ void PeerDiscovery::broadcastAnnouncement() {
     // Encode the announcement using FileBridge's defined discovery wire format
     const QByteArray data = serializeAnnouncement(announcement);
 
-    // Broadcast the announcement to FileBridge instances listening on the local network
-    socket_.writeDatagram(
-        data,                       // Data: Serialized FileBridge discovery announcement
-        DISCOVERY_MULTICAST_GROUP,  // Address: Mulitcast group joined by nearby FileBridge instances
-        DISCOVERY_PORT              // Port: Shared UDP port used by FileBridge discovery
-    );
+    // Send the announcement through every interface that successfully joined
+    // the discovery group so systems with multiple adapters do not depend on
+    // whichever multicast route the operating system happens to choose.
+    for(const QNetworkInterface& interface : multicastInterfaces_) {
+        socket_.setMulticastInterface(interface);
+
+        socket_.writeDatagram(
+            data,                       // Data: Serialized FileBridge discovery announcement.
+            DISCOVERY_MULTICAST_GROUP,  // Address: Multicast group joined by nearby FileBridge instances.
+            DISCOVERY_PORT              // Port: Shared UDP port used by FileBridge discovery.
+        );
+    }
 }
 
 
